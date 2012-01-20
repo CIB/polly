@@ -71,6 +71,22 @@ class Value;
 
 namespace polly {
 typedef std::set<const SCEV *> ParamSetType;
+enum RejectKind {
+  Unknown,
+  NonAffineCondition,
+  NonAffineLoopBound,
+  NonAffineAccess,
+  Alias
+};
+
+struct RejectInfo {
+  RejectKind Reason;
+  const SCEV *Failed_LHS; // The (first) SCEV before this region got rejected.
+  const SCEV *Failed_RHS; // The (second) SCEV before this region got rejected.
+
+  RejectInfo(RejectKind r, const SCEV *s, const SCEV *ss) :
+    Reason(r), Failed_LHS(s), Failed_RHS(ss) {}
+};
 
 extern bool PollyTrackFailures;
 
@@ -78,6 +94,7 @@ extern bool PollyTrackFailures;
 /// @brief Pass to detect the maximal static control parts (Scops) of a
 /// function.
 class ScopDetection : public FunctionPass {
+  friend class ScopProfileInfo;
   //===--------------------------------------------------------------------===//
   ScopDetection(const ScopDetection &) LLVM_DELETED_FUNCTION;
   const ScopDetection &operator=(const ScopDetection &) LLVM_DELETED_FUNCTION;
@@ -95,9 +112,15 @@ class ScopDetection : public FunctionPass {
     Region &CurRegion;   // The region to check.
     AliasSetTracker AST; // The AliasSetTracker to hold the alias information.
     bool Verifying;      // If we are in the verification phase?
+    RejectInfo RI;        // Store any information about the rejection of this region.
     DetectionContext(Region &R, AliasAnalysis &AA, bool Verify)
-        : CurRegion(R), AST(AA), Verifying(Verify) {}
+      : CurRegion(R), AST(AA), Verifying(Verify),
+        RI(RejectInfo(Unknown, NULL, NULL)) {}
   };
+
+  // Store rejected regions for further analysis.
+  typedef std::map<const Region*, RejectInfo> RejectedRegionMap;
+  RejectedRegionMap RejectedRegions;
 
   // Remember the valid regions
   typedef std::set<const Region *> RegionSet;
@@ -231,6 +254,21 @@ public:
   /// @return Return true if R is the maximum Region in a Scop, false otherwise.
   bool isMaxRegionInScop(const Region &R) const;
 
+  /// @name Rejected Region Iterators
+  ///
+  /// Allow iteration over all rejected regions for further analysis.
+  //@{
+  typedef RejectedRegionMap::iterator rejected_iterator;
+  typedef RejectedRegionMap::const_iterator const_rejected_iterator;
+
+  rejected_iterator rej_begin() { return RejectedRegions.begin(); }
+  rejected_iterator rej_end() { return RejectedRegions.end(); }
+
+  const_rejected_iterator rej_begin() const { return RejectedRegions.begin(); }
+  const_rejected_iterator rej_end() const { return RejectedRegions.end(); }
+
+  RejectedRegionMap getRejects() { return RejectedRegions; }
+  //@}
   /// @brief Get a message why a region is invalid
   ///
   /// @param R The region for which we get the error message
@@ -250,7 +288,9 @@ public:
   iterator end() { return ValidRegions.end(); }
 
   const_iterator begin() const { return ValidRegions.begin(); }
-  const_iterator end() const { return ValidRegions.end(); }
+  const_iterator end()   const { return ValidRegions.end();   }
+
+  RegionSet getValidRegions() { return ValidRegions; }
   //@}
 
   /// @brief Mark the function as invalid so we will not extract any scop from
