@@ -21,3 +21,6 @@ add_polly_library(PollyCodeGen
   Utils.cpp
   ${GPGPU_CODEGEN_FILES}
 )
+
+add_dependencies(PollyCodeGen PollySupport)
+target_link_libraries(PollyCodeGen PollySupport)

@@ -5,6 +5,9 @@
 #
 LEVEL :=..
 
+DIRS = Support
+USEDLIBS = PollySupport.a
+
 LIBRARYNAME=LLVMPolly
 LOADABLE_MODULE = 1
 
@@ -12,8 +15,8 @@ include $(LEVEL)/Makefile.config
 
 CPP.Flags += $(POLLY_INC)
 
-DIRS = Exchange
-USEDLIBS = pollyexchange.a
+DIRS += Exchange
+USEDLIBS += PollyExchange.a
 
 DIRS += Analysis
 USEDLIBS += pollyanalysis.a
@@ -21,14 +24,11 @@ USEDLIBS += pollyanalysis.a
 DIRS += CodeGen
 USEDLIBS += pollycodegen.a
 
-# This needs to  be added after the files that use it, otherwise some functions
-# from pollysupport are not available. They will be eliminated if they are
-# not used at the time of linking pollysupport.a
-DIRS += Support
-USEDLIBS += pollysupport.a
-
 DIRS += JSON
 USEDLIBS += pollyjson.a
+
+DIRS += Transform
+USEDLIBS += pollytransform.a
 
 # TODO: Export symbols for RTTI or EH?
 
@@ -92,4 +92,15 @@ $(LibDir)/libpollyjson.a : $(LibDir)/.dir $(PROJ_OBJ_DIR)/JSON/$(BuildMode)/.dir
       $(CP) $(PROJ_SRC_DIR)/JSON/Makefile JSON/Makefile; \
     fi; \
     ($(MAKE) -C JSON $@ ) || exit 1; \
+  fi
+
+$(LibDir)/libpollytransform.a : $(LibDir)/.dir $(PROJ_OBJ_DIR)/Transform/$(BuildMode)/.dir \
+                              $(PROJ_SRC_DIR)/Transform/*
+	$(Verb) if [ -d $(PROJ_SRC_DIR)/Transform ]; then\
+    if ([ ! -f Transform/Makefile ] || \
+        command test Transform/Makefile -ot $(PROJ_SRC_DIR)/Transform/Makefile ); then \
+      $(MKDIR) Transform; \
+      $(CP) $(PROJ_SRC_DIR)/Transform/Makefile Transform/Makefile; \
+    fi; \
+    ($(MAKE) -C Transform $@ ) || exit 1; \
   fi

@@ -58,6 +58,8 @@
 using namespace polly;
 using namespace llvm;
 
+VectorizerChoice polly::PollyVectorizerChoice;
+
 struct isl_set;
 
 namespace polly {
