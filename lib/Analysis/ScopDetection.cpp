@@ -181,7 +181,7 @@ bool ScopDetection::isValidCFG(BasicBlock &BB,
 
   BranchInst *Br = dyn_cast<BranchInst>(TI);
 
-  if (!Br) {
+  if (!Br)
     INVALID(CFG, "Non branch instruction terminates BB: " + BB.getName());
     return false;
   }
@@ -192,13 +192,13 @@ bool ScopDetection::isValidCFG(BasicBlock &BB,
   Value *Condition = Br->getCondition();
 
   // UndefValue is not allowed as condition.
-  if (isa<UndefValue>(Condition)) {
+  if (isa<UndefValue>(Condition))
     INVALID(AffFunc, "Condition based on 'undef' value in BB: " + BB.getName());
     return false;
   }
 
   // Only Constant and ICmpInst are allowed as condition.
-  if (!(isa<Constant>(Condition) || isa<ICmpInst>(Condition))) {
+  if (!(isa<Constant>(Condition) || isa<ICmpInst>(Condition)))
     INVALID(AffFunc, "Condition in BB '" + BB.getName() +
                          "' neither constant nor an icmp instruction");
     return false;
@@ -328,13 +328,17 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
 
   if (!AllowNonAffine &&
       !isAffineExpr(&Context.CurRegion, AccessFunction, *SE, BaseValue)) {
-    INVALID(AffFunc, "Non affine access function: " << *AccessFunction);
+	Context.RI.Reason = NonAffineAccess;
+    Context.RI.Failed_LHS = AccessFunction;
+    Context.RI.Failed_RHS = NULL;    
+	INVALID(AffFunc, "Non affine access function: " << *AccessFunction);
     return false;
   }
 
   // FIXME: Alias Analysis thinks IntToPtrInst aliases with alloca instructions
   // created by IndependentBlocks Pass.
   if (isa<IntToPtrInst>(BaseValue)) {
+    Context.RI.Reason = Alias;
     INVALID(Other, "Find bad intToptr prt: " << *BaseValue);
     return false;
   }
@@ -356,6 +360,7 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
   // not proof this without -basicaa we would fail. We disable this check to
   // not cause irrelevant verification failures.
   if (!AS.isMustAlias()) {
+	Context.RI.Reason = Alias;
     INVALID_NOVERIFY(Alias, formatInvalidAlias(AS));
     return false;
   }
@@ -419,6 +424,9 @@ bool ScopDetection::isValidLoop(Loop *L, DetectionContext &Context) const {
   // Is the loop count affine?
   const SCEV *LoopCount = SE->getBackedgeTakenCount(L);
   if (!isAffineExpr(&Context.CurRegion, LoopCount, *SE)) {
+	Context.RI.Reason = NonAffineLoopBound;
+    Context.RI.Failed_LHS = LoopCount;
+    Context.RI.Failed_RHS = NULL;    
     INVALID(LoopBound, "Non affine loop bound '" << *LoopCount << "' in loop: "
                                                  << L->getHeader()->getName());
     return false;
@@ -496,7 +504,8 @@ void ScopDetection::findScops(Region &R) {
     ++ValidRegion;
     ValidRegions.insert(&R);
     return;
-  }
+  } else
+    RejectedRegions.insert(std::pair<const Region*, RejectInfo>(&R, Context.RI));
 
   InvalidRegions[&R] = LastFailure;
 
@@ -514,6 +523,7 @@ void ScopDetection::findScops(Region &R) {
   for (Region::iterator I = R.begin(), E = R.end(); I != E; ++I)
     ToExpand.push_back(*I);
 
+  bool hasInvalidChild = false;
   for (std::vector<Region *>::iterator RI = ToExpand.begin(),
                                        RE = ToExpand.end();
        RI != RE; ++RI) {
@@ -521,8 +531,10 @@ void ScopDetection::findScops(Region &R) {
 
     // Skip invalid regions. Regions may become invalid, if they are element of
     // an already expanded region.
-    if (ValidRegions.find(CurrentRegion) == ValidRegions.end())
+    if (ValidRegions.find(CurrentRegion) == ValidRegions.end()) {
+      hasInvalidChild = true;
       continue;
+    }
 
     Region *ExpandedR = expandRegion(*CurrentRegion);
 
@@ -537,6 +549,9 @@ void ScopDetection::findScops(Region &R) {
          ++I)
       ValidRegions.erase(*I);
   }
+
+  if (!hasInvalidChild)
+    RejectedRegions.insert(std::pair<const Region*, RejectInfo>(&R, Context.RI));
 }
 
 bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
@@ -701,6 +716,7 @@ bool ScopDetection::runOnFunction(llvm::Function &F) {
   if (!isValidFunction(F))
     return false;
 
+  RejectedRegions.clear();
   findScops(*TopRegion);
 
   if (ReportLevel >= 1)
