@@ -105,6 +105,9 @@ struct RejectInfo {
     case Scalar:
         reason = "scalar dependency.";
         break;
+    case Call:
+        reason = "function call.";
+        break;
     default:
         reason = "unknown";
         break;
@@ -196,6 +199,14 @@ class ScopDetection : public FunctionPass {
   /// @param CI The call instruction to check.
   /// @return True if the call instruction is valid, false otherwise.
   static bool isValidCallInst(CallInst &CI);
+
+  /// @brief Check if a value is invariant in the region Reg.
+  ///
+  /// @param Val Value to check for invariance.
+  ///
+  /// @return True if the value represented by Val is invariant
+  ///         in the region identified by Reg.
+  bool isInvariant(const Value &Val, const Region &Reg) const;
 
   /// @brief Format the invalid alias message.
   ///

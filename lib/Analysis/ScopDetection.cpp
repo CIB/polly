@@ -271,6 +271,64 @@ bool ScopDetection::isValidCallInst(CallInst &CI) {
   return false;
 }
 
+//
+// Check if value Val is invariant in region Reg. Return True if
+// Val is invariant in Reg.
+//
+bool ScopDetection::isInvariant(const Value &Val, const Region &Reg) const {
+  // reference to function argument -> invariant
+  // constant value -> invariant
+  if (dyn_cast<Argument>(&Val) || dyn_cast<Constant>(&Val))
+    return true;
+
+  const Instruction *I = dyn_cast<Instruction>(&Val);
+  // not an argument and not aninstruction -> assume variant
+  if (!I)
+    return false;
+
+  // not contained in region Reg -> invariant in Reg
+  if (!Reg.contains(I))
+    return true;
+
+  // has side effects -> not invariant
+  // is a Phi node -> (likely) not invariant
+  // We do not check whether Phi nodes are actually invariant,
+  // we assume that phi nodes are usually not invariant.
+  // Recursively checking the operators of phi nodes would
+  // leed to infinite recursion.
+  if (I->mayHaveSideEffects() || dyn_cast<PHINode>(I))
+    return false;
+
+  // Check that all operands of the instruction are
+  // themselves invariant.
+  unsigned nOps = I->getNumOperands();
+  for (unsigned op=0; op<nOps; ++op) {
+    // operand is not invariant -> Val is not invariant
+    if (!isInvariant(*(I->getOperand(op)), Reg))
+      return false;
+  }
+
+  // When the instruction is a load instruction,
+  // check that no write to memory in the region aliases
+  // with the load.
+  if (const LoadInst *LI = dyn_cast<LoadInst>(I)) {
+    AliasAnalysis::Location Loc = AA->getLocation(LI);
+    const Region::const_block_iterator block_begin = Reg.block_begin(),
+        block_end = Reg.block_end();
+    // Check if any basic block in the region
+    // can modify the location pointed to by 'Loc'.
+    // If so, 'Val' is (likely) not invariant in the region.
+    for (Region::const_block_iterator bit=block_begin;
+         bit!=block_end; ++bit) {
+      const BasicBlock &BB = **bit;
+      if (AA->canBasicBlockModify(BB, Loc))
+        return false;
+    }
+  }
+
+  return true;
+}
+
 std::string ScopDetection::formatInvalidAlias(AliasSet &AS) const {
   std::string Message;
   raw_string_ostream OS(Message);
@@ -325,6 +383,12 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
   if (isa<UndefValue>(BaseValue)) {
     INVALID(AffFunc, "Undefined base pointer");
     return false;
+  }
+
+  // Check that the base address of the access is
+  // invariant in the current region.
+  if (!isInvariant(*BaseValue, Context.CurRegion)) {
+    INVALID(AffFunc, "Base address not invariant in current region:" << *BaseValue);
   }
 
   AccessFunction = SE->getMinusSCEV(AccessFunction, BasePointer);
