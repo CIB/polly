@@ -200,7 +200,7 @@ bool ScopDetection::isValidCFG(BasicBlock &BB,
   // Only Constant and ICmpInst are allowed as condition.
   if (!(isa<Constant>(Condition) || isa<ICmpInst>(Condition))) {
     INVALID(AffFunc, "Condition in BB '" + BB.getName() +
-                         "' neither constant nor an icmp instruction");
+                     "' neither constant nor an icmp instruction");
     return false;
   }
 
@@ -229,6 +229,9 @@ bool ScopDetection::isValidCFG(BasicBlock &BB,
 
     if (!isAffineExpr(&Context.CurRegion, LHS, *SE) ||
         !isAffineExpr(&Context.CurRegion, RHS, *SE)) {
+      RejectInfo RI(NonAffineCondition, LHS, RHS);
+      Context.RejectLog.push_back(RI);
+
       INVALID(AffFunc, "Non affine branch in BB '" << BB.getName()
                                                    << "' with LHS: " << *LHS
                                                    << " and RHS: " << *RHS);
@@ -326,21 +329,23 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
 
   AccessFunction = SE->getMinusSCEV(AccessFunction, BasePointer);
 
-  if (!AllowNonAffine &&
-      !isAffineExpr(&Context.CurRegion, AccessFunction, *SE, BaseValue)) {
-	Context.RI.Reason = NonAffineAccess;
-    Context.RI.Failed_LHS = AccessFunction;
-    Context.RI.Failed_RHS = NULL;    
-	INVALID(AffFunc, "Non affine access function: " << *AccessFunction);
-    return false;
+  if (!isAffineExpr(&Context.CurRegion, AccessFunction, *SE, BaseValue)) {
+    RejectInfo RI(NonAffineAccess, AccessFunction);
+    Context.RejectLog.push_back(RI);
+
+    if (!AllowNonAffine) {
+      INVALID(AffFunc, "Non affine access function: " << *AccessFunction);
+      return false;
+    }
   }
 
   // FIXME: Alias Analysis thinks IntToPtrInst aliases with alloca instructions
   // created by IndependentBlocks Pass.
   if (isa<IntToPtrInst>(BaseValue)) {
-    Context.RI.Reason = Alias;
+    RejectInfo RI(Alias);
+    Context.RejectLog.push_back(RI);
+
     INVALID(Other, "Find bad intToptr prt: " << *BaseValue);
-    return false;
   }
 
   if (IgnoreAliasing)
@@ -360,7 +365,8 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
   // not proof this without -basicaa we would fail. We disable this check to
   // not cause irrelevant verification failures.
   if (!AS.isMustAlias()) {
-	Context.RI.Reason = Alias;
+    RejectInfo RI(Alias);
+    Context.RejectLog.push_back(RI);
     INVALID_NOVERIFY(Alias, formatInvalidAlias(AS));
     return false;
   }
@@ -424,9 +430,8 @@ bool ScopDetection::isValidLoop(Loop *L, DetectionContext &Context) const {
   // Is the loop count affine?
   const SCEV *LoopCount = SE->getBackedgeTakenCount(L);
   if (!isAffineExpr(&Context.CurRegion, LoopCount, *SE)) {
-	Context.RI.Reason = NonAffineLoopBound;
-    Context.RI.Failed_LHS = LoopCount;
-    Context.RI.Failed_RHS = NULL;    
+    RejectInfo RI(NonAffineLoopBound, LoopCount);
+    Context.RejectLog.push_back(RI);
     INVALID(LoopBound, "Non affine loop bound '" << *LoopCount << "' in loop: "
                                                  << L->getHeader()->getName());
     return false;
@@ -500,12 +505,17 @@ void ScopDetection::findScops(Region &R) {
 
   LastFailure = "";
 
-  if (isValidRegion(Context)) {
+  bool validRegion = isValidRegion(Context);
+  
+  if (validRegion) {
     ++ValidRegion;
     ValidRegions.insert(&R);
+    // Even if we allow/ignore restrictions, we still have to track the reject
+    // reasons.
+    if (Context.RejectLog.size() > 0)
+      RejectLog[&R] = Context.RejectLog;
     return;
-  } else
-    RejectedRegions.insert(std::pair<const Region*, RejectInfo>(&R, Context.RI));
+  }
 
   InvalidRegions[&R] = LastFailure;
 
@@ -523,7 +533,6 @@ void ScopDetection::findScops(Region &R) {
   for (Region::iterator I = R.begin(), E = R.end(); I != E; ++I)
     ToExpand.push_back(*I);
 
-  bool hasInvalidChild = false;
   for (std::vector<Region *>::iterator RI = ToExpand.begin(),
                                        RE = ToExpand.end();
        RI != RE; ++RI) {
@@ -531,10 +540,8 @@ void ScopDetection::findScops(Region &R) {
 
     // Skip invalid regions. Regions may become invalid, if they are element of
     // an already expanded region.
-    if (ValidRegions.find(CurrentRegion) == ValidRegions.end()) {
-      hasInvalidChild = true;
+    if (ValidRegions.find(CurrentRegion) == ValidRegions.end())
       continue;
-    }
 
     Region *ExpandedR = expandRegion(*CurrentRegion);
 
@@ -545,13 +552,17 @@ void ScopDetection::findScops(Region &R) {
     ValidRegions.insert(ExpandedR);
     ValidRegions.erase(CurrentRegion);
 
-    for (Region::iterator I = ExpandedR->begin(), E = ExpandedR->end(); I != E;
-         ++I)
-      ValidRegions.erase(*I);
-  }
+    if (Context.RejectLog.size() > 0)
+      RejectLog[&R] = Context.RejectLog;
 
-  if (!hasInvalidChild)
-    RejectedRegions.insert(std::pair<const Region*, RejectInfo>(&R, Context.RI));
+    for (Region::iterator I = ExpandedR->begin(), E = ExpandedR->end(); I != E;
+         ++I) {
+      ValidRegions.erase(*I);
+
+      if (RejectLog.count(*I))
+        RejectLog.erase(*I);
+    }
+  }
 }
 
 bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
@@ -716,7 +727,6 @@ bool ScopDetection::runOnFunction(llvm::Function &F) {
   if (!isValidFunction(F))
     return false;
 
-  RejectedRegions.clear();
   findScops(*TopRegion);
 
   if (ReportLevel >= 1)
@@ -761,6 +771,9 @@ void ScopDetection::print(raw_ostream &OS, const Module *) const {
 void ScopDetection::releaseMemory() {
   ValidRegions.clear();
   InvalidRegions.clear();
+
+  RejectLog.clear();
+  
   // Do not clear the invalid function set.
 }
 
