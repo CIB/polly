@@ -48,6 +48,7 @@
 #define POLLY_SCOP_DETECTION_H
 
 #include "llvm/Pass.h"
+#include "llvm/IR/Function.h"
 #include "llvm/Analysis/AliasSetTracker.h"
 
 #include <set>
@@ -73,10 +74,12 @@ namespace polly {
 typedef std::set<const SCEV *> ParamSetType;
 enum RejectKind {
   Unknown,
+  Scalar,
   NonAffineCondition,
   NonAffineLoopBound,
   NonAffineAccess,
-  Alias
+  Alias,
+  Call
 };
 
 struct RejectInfo {
@@ -84,9 +87,36 @@ struct RejectInfo {
   const SCEV *Failed_LHS; // The (first) SCEV before this region got rejected.
   const SCEV *Failed_RHS; // The (second) SCEV before this region got rejected.
 
-  RejectInfo(RejectKind r, const SCEV *s, const SCEV *ss) :
+  std::string getRejectReason() {
+    std::string reason = "";
+    switch(Reason) {
+    case NonAffineAccess:
+        reason = "non affine access function.";
+        break;
+    case NonAffineCondition:
+        reason = "non affine condition.";
+        break;
+    case NonAffineLoopBound:
+        reason = "non affine loopbound.";
+        break;
+    case Alias:
+        reason = "base pointer aliasing.";
+        break;
+    case Scalar:
+        reason = "scalar dependency.";
+        break;
+    default:
+        reason = "unknown";
+        break;
+    }
+    return reason;
+  }
+
+  RejectInfo(RejectKind r, const SCEV *s = NULL, const SCEV *ss = NULL) :
     Reason(r), Failed_LHS(s), Failed_RHS(ss) {}
+  RejectInfo() : Reason(Unknown), Failed_LHS(NULL), Failed_RHS(NULL) {}
 };
+typedef std::map<const Region*, std::vector<RejectInfo> > RejectedLog;
 
 extern bool PollyTrackFailures;
 
@@ -112,15 +142,14 @@ class ScopDetection : public FunctionPass {
     Region &CurRegion;   // The region to check.
     AliasSetTracker AST; // The AliasSetTracker to hold the alias information.
     bool Verifying;      // If we are in the verification phase?
-    RejectInfo RI;        // Store any information about the rejection of this region.
+    
+    std::vector<RejectInfo> RejectLog;
     DetectionContext(Region &R, AliasAnalysis &AA, bool Verify)
-      : CurRegion(R), AST(AA), Verifying(Verify),
-        RI(RejectInfo(Unknown, NULL, NULL)) {}
+      : CurRegion(R), AST(AA), Verifying(Verify) {}
   };
 
-  // Store rejected regions for further analysis.
-  typedef std::map<const Region*, RejectInfo> RejectedRegionMap;
-  RejectedRegionMap RejectedRegions;
+  // Store all errors associated to one region.
+  RejectedLog RejectLog;
 
   // Remember the valid regions
   typedef std::set<const Region *> RegionSet;
@@ -254,20 +283,6 @@ public:
   /// @return Return true if R is the maximum Region in a Scop, false otherwise.
   bool isMaxRegionInScop(const Region &R) const;
 
-  /// @name Rejected Region Iterators
-  ///
-  /// Allow iteration over all rejected regions for further analysis.
-  //@{
-  typedef RejectedRegionMap::iterator rejected_iterator;
-  typedef RejectedRegionMap::const_iterator const_rejected_iterator;
-
-  rejected_iterator rej_begin() { return RejectedRegions.begin(); }
-  rejected_iterator rej_end() { return RejectedRegions.end(); }
-
-  const_rejected_iterator rej_begin() const { return RejectedRegions.begin(); }
-  const_rejected_iterator rej_end() const { return RejectedRegions.end(); }
-
-  RejectedRegionMap getRejects() { return RejectedRegions; }
   //@}
   /// @brief Get a message why a region is invalid
   ///
@@ -292,6 +307,10 @@ public:
 
   RegionSet getValidRegions() { return ValidRegions; }
   //@}
+
+  /// @brief Get the log of rejected regions.
+  /// TODO: Provide iterators instead of an accessor.
+  RejectedLog &getRejectedLog() { return RejectLog; }
 
   /// @brief Mark the function as invalid so we will not extract any scop from
   ///        the function.
