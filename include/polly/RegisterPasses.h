@@ -10,10 +10,17 @@
 // Functions to register the Polly passes in a LLVM pass manager.
 //
 //===----------------------------------------------------------------------===//
-
 #ifndef POLLY_REGISTER_PASSES_H
 #define POLLY_REGISTER_PASSES_H
+
 namespace llvm {
-class PassManagerBase;
+  class PassManagerBase;
+  class PassRegistry;
 }
-#endif
+
+namespace polly {
+  void initializePollyPasses(llvm::PassRegistry &Registry);
+  void registerPollyPasses(llvm::PassManagerBase &PM);
+  void registerCanonicalicationPasses(llvm::PassManagerBase &PM);
+} // end of polly namespace.
+#endif //POLLY_REGISTER_PASSES_H
