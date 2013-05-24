@@ -8,6 +8,11 @@ add_subdirectory(Transform)
 set(MODULE TRUE)
 set(LLVM_NO_RTTI 1)
 
+set(LLVM_LINK_COMPONENTS
+  ipo
+  support
+  )
+
 set(LLVM_USED_LIBS
   PollyAnalysis
   PollyCodeGen
@@ -18,7 +23,7 @@ set(LLVM_USED_LIBS
   )
 
 add_polly_loadable_module(LLVMPolly
-  RegisterPasses.cpp
+  Polly.cpp
   )
 
 if (TARGET intrinsics_gen)
@@ -30,9 +35,9 @@ add_dependencies(LLVMPolly
   PollyAnalysis
   PollyCodeGen
   PollyExchange
-  PollySupport
   PollyJSON
   PollyTransform
+  PollySupport
   )
 
 set_target_properties(LLVMPolly

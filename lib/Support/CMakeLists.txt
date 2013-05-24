@@ -3,4 +3,5 @@ add_polly_library(PollySupport
   SCEVValidator.cpp
   ScopHelper.cpp
   CodePreparation.cpp
+  RegisterPasses.cpp
   )
