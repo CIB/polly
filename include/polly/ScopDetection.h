@@ -51,6 +51,8 @@
 #include "llvm/IR/Function.h"
 #include "llvm/Analysis/AliasSetTracker.h"
 
+#include "llvm/Support/raw_ostream.h"
+
 #include <set>
 #include <map>
 
