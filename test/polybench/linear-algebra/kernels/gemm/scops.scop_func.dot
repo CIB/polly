@@ -1,0 +1,50 @@
+digraph "Scop Graph for 'scop_func' function" {
+	label="Scop Graph for 'scop_func' function";
+
+	Node0xedff90 [shape=record,label="{bb.nph26.bb.nph26.split_crit_edge:\l  %.lcssa.reg2mem = alloca double\l  %.tmp.0.us.reg2mem = alloca double\l  br label %bb.nph26.bb.nph26.split_crit_edge.split\l}"];
+	Node0xedff90 -> Node0xee6c70;
+	Node0xee6c70 [shape=record,label="{bb.nph26.bb.nph26.split_crit_edge.split:          \l  %0 = load double* @beta, align 8\l  %1 = load double* @alpha, align 8\l  br label %bb5.preheader\l}"];
+	Node0xee6c70 -> Node0xee77d0;
+	Node0xee77d0 [shape=record,label="{bb5.preheader:                                    \l  %storemerge9 = phi i64 [ 0, %bb.nph26.bb.nph26.split_crit_edge.split ], [ %11, %bb6 ]\l  br label %bb.nph.us\l}"];
+	Node0xee77d0 -> Node0xee6c90;
+	Node0xee6c90 [shape=record,label="{bb.nph.us:                                        \l  %storemerge14.us = phi i64 [ %2, %bb4.us ], [ 0, %bb5.preheader ]\l  %scevgep30 = getelementptr [512 x [512 x double]]* @C, i64 0, i64 %storemerge9, i64 %storemerge14.us\l  %9 = load double* %scevgep30, align 8\l  %10 = fmul double %9, %0\l  store double %10, double* %scevgep30, align 8\l  store double %10, double* %.tmp.0.us.reg2mem\l  br label %bb2.us\l}"];
+	Node0xee6c90 -> Node0xee7240;
+	Node0xee7240 [shape=record,label="{bb2.us:                                           \l  %storemerge23.us = phi i64 [ 0, %bb.nph.us ], [ %8, %bb2.us ]\l  %.tmp.0.us.reload = load double* %.tmp.0.us.reg2mem\l  %scevgep27 = getelementptr [512 x [512 x double]]* @A, i64 0, i64 %storemerge9, i64 %storemerge23.us\l  %scevgep = getelementptr [512 x [512 x double]]* @B, i64 0, i64 %storemerge23.us, i64 %storemerge14.us\l  %3 = load double* %scevgep27, align 8\l  %4 = fmul double %3, %1\l  %5 = load double* %scevgep, align 8\l  %6 = fmul double %4, %5\l  %7 = fadd double %.tmp.0.us.reload, %6\l  %8 = add nsw i64 %storemerge23.us, 1\l  %exitcond1 = icmp eq i64 %8, 512\l  store double %7, double* %.tmp.0.us.reg2mem\l  store double %7, double* %.lcssa.reg2mem\l  br i1 %exitcond1, label %bb4.us, label %bb2.us\l}"];
+	Node0xee7240 -> Node0xee7140;
+	Node0xee7240 -> Node0xee7240[constraint=false];
+	Node0xee7140 [shape=record,label="{bb4.us:                                           \l  %.lcssa.reload = load double* %.lcssa.reg2mem\l  store double %.lcssa.reload, double* %scevgep30\l  %2 = add nsw i64 %storemerge14.us, 1\l  %exitcond = icmp eq i64 %2, 512\l  br i1 %exitcond, label %bb6, label %bb.nph.us\l}"];
+	Node0xee7140 -> Node0xee71a0;
+	Node0xee7140 -> Node0xee6c90[constraint=false];
+	Node0xee71a0 [shape=record,label="{bb6:                                              \l  %11 = add nsw i64 %storemerge9, 1\l  %exitcond6 = icmp ne i64 %11, 512\l  br i1 %exitcond6, label %bb5.preheader, label %return\l}"];
+	Node0xee71a0 -> Node0xee77d0[constraint=false];
+	Node0xee71a0 -> Node0xee60d0;
+	Node0xee60d0 [shape=record,label="{return:                                           \l  ret void\l}"];
+	colorscheme = "paired12"
+        subgraph cluster_0xedf310 {
+          label = "";
+          style = solid;
+          color = 1
+          subgraph cluster_0xee0420 {
+            label = "";
+            style = filled;
+            color = 3            subgraph cluster_0xee03a0 {
+              label = "";
+              style = solid;
+              color = 5
+              subgraph cluster_0xedf640 {
+                label = "";
+                style = solid;
+                color = 7
+                Node0xee7240;
+              }
+              Node0xee6c90;
+              Node0xee7140;
+            }
+            Node0xee77d0;
+            Node0xee71a0;
+          }
+          Node0xedff90;
+          Node0xee6c70;
+          Node0xee60d0;
+        }
+}
