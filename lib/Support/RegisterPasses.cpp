@@ -27,6 +27,7 @@
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopDetection.h"
+#include "polly/ScopStatistics.h"
 #include "polly/ScopInfo.h"
 #include "polly/TempScopInfo.h"
 #include "llvm/Analysis/CFGPrinter.h"
@@ -171,6 +172,7 @@ void initializePollyPasses(PassRegistry &Registry) {
   initializePoccPass(Registry);
 #endif
   initializePollyIndVarSimplifyPass(Registry);
+  initializeScopStatisticsPass(Registry);
   initializeScopDetectionPass(Registry);
   initializeScopInfoPass(Registry);
   initializeTempScopInfoPass(Registry);
