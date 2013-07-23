@@ -8,18 +8,23 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/CommandLine.h"
 #include "polly/LinkAllPasses.h"
-
+#include "polly/Dependences.h"
+#include "isl/map.h"
 
 using namespace llvm;
 using namespace polly;
 
 bool ScopStatistics::runOnScop(Scop &S) {
   outs() << ">>>>>>>>>"  << S.getNameStr() << "\n";
-  outs() << "Your mom";
+  Dependences *DE = &getAnalysis<Dependences>();
+  isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
+  
   return false;
 }
 
 void ScopStatistics::getAnalysisUsage(AnalysisUsage &AU) const {
+  //AU.addRequired<AliasAnalysis>();
+  AU.addRequired<Dependences>();
   AU.addRequired<ScopInfo>();
   AU.setPreservesAll();
 }
