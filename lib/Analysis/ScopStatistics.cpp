@@ -14,7 +14,7 @@ using namespace llvm;
 using namespace polly;
 
 struct mapSave {
-  // stuff
+  unsigned nparam;
 } s;
 
 int workOnMap(__isl_take isl_map *map, void *user);
@@ -23,9 +23,11 @@ bool ScopStatistics::runOnScop(Scop &S) {
   outs() << ">>>>>>>>>"  << S.getNameStr() << "\n";
   Dependences *DE = &getAnalysis<Dependences>();
   isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
-  //outs() << "Map dump:" << isl_union_map_dump(m);
+  outs() << "Map dump: "; isl_union_map_dump(m);
 
   isl_union_map_foreach_map(m, workOnMap, &s);
+
+  outs() << "Some nParam: " << s.nparam;
   
   return false;
 }
@@ -38,6 +40,8 @@ void ScopStatistics::getAnalysisUsage(AnalysisUsage &AU) const {
 }
 
 int workOnMap(__isl_take isl_map *map, void *user) {
+  mapSave* mapS = (mapSave*) user;
+  mapS->nparam = isl_map_n_param(map);
 
   return 0;
 }
