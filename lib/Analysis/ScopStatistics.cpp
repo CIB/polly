@@ -13,10 +13,19 @@
 using namespace llvm;
 using namespace polly;
 
+struct mapSave {
+  // stuff
+} s;
+
+int workOnMap(__isl_take isl_map *map, void *user);
+
 bool ScopStatistics::runOnScop(Scop &S) {
   outs() << ">>>>>>>>>"  << S.getNameStr() << "\n";
   Dependences *DE = &getAnalysis<Dependences>();
   isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
+  //outs() << "Map dump:" << isl_union_map_dump(m);
+
+  isl_union_map_foreach_map(m, workOnMap, &s);
   
   return false;
 }
@@ -26,6 +35,11 @@ void ScopStatistics::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<Dependences>();
   AU.addRequired<ScopInfo>();
   AU.setPreservesAll();
+}
+
+int workOnMap(__isl_take isl_map *map, void *user) {
+
+  return 0;
 }
 
 char ScopStatistics::ID = 0;
