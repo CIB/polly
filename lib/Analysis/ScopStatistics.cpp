@@ -20,35 +20,37 @@ struct mapSave {
 int workOnMap(__isl_take isl_map *map, void *user);
 
 bool ScopStatistics::runOnScop(Scop &S) {
-  outs() << ">>>>>>>>>"  << S.getNameStr() << "\n";
-  Dependences *DE = &getAnalysis<Dependences>();
-  isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
-  outs() << "Map dump: "; isl_union_map_dump(m);
+    outs() << "<<>>>>>>>>>"  << S.getNameStr() << "\n";
+    Dependences *DE = &getAnalysis<Dependences>();
+    isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
+    outs() << "Map dump: "; isl_union_map_dump(m);
 
-  isl_union_map_foreach_map(m, workOnMap, &s);
+    isl_union_map_foreach_map(m, workOnMap, &s);
 
-  outs() << "Some nParam: " << s.nparam;
-  
-  return false;
-}
+    outs() << "\n ----------------- \n";
 
-void ScopStatistics::getAnalysisUsage(AnalysisUsage &AU) const {
-  //AU.addRequired<AliasAnalysis>();
-  AU.addRequired<Dependences>();
-  AU.addRequired<ScopInfo>();
-  AU.setPreservesAll();
-}
+    outs() << "Some nParam: " << s.nparam;
+    
+    return false;
+  }
 
-int workOnMap(__isl_take isl_map *map, void *user) {
-  mapSave* mapS = (mapSave*) user;
-  mapS->nparam = isl_map_n_param(map);
+  void ScopStatistics::getAnalysisUsage(AnalysisUsage &AU) const {
+    //AU.addRequired<AliasAnalysis>();
+    AU.addRequired<Dependences>();
+    AU.addRequired<ScopInfo>();
+    AU.setPreservesAll();
+  }
 
-  return 0;
-}
+  int workOnMap(__isl_take isl_map *map, void *user) {
+    mapSave* mapS = (mapSave*) user;
+    mapS->nparam = isl_map_n_param(map);
 
-char ScopStatistics::ID = 0;
+    return 0;
+  }
 
-Pass *polly::createScopStatisticsPass() {return new ScopStatistics(); }
+  char ScopStatistics::ID = 0;
 
-INITIALIZE_PASS_BEGIN(ScopStatistics, "polly-stat","Polly - get stats", false, false);
-INITIALIZE_PASS_END(ScopStatistics, "polly-stat","Polly - get stats", false, false);
+  Pass *polly::createScopStatisticsPass() {return new ScopStatistics(); }
+
+  INITIALIZE_PASS_BEGIN(ScopStatistics, "polly-stat","Polly - get stats", false, false);
+  INITIALIZE_PASS_END(ScopStatistics, "polly-stat","Polly - get stats", false, false);
