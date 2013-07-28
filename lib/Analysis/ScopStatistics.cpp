@@ -18,6 +18,7 @@ struct mapSave {
 } s;
 
 int workOnMap(__isl_take isl_map *map, void *user);
+int testOnMap(__isl_take isl_map *map, void *user);
 
 bool ScopStatistics::runOnScop(Scop &S) {
     outs() << "<<>>>>>>>>>"  << S.getNameStr() << "\n";
@@ -25,7 +26,8 @@ bool ScopStatistics::runOnScop(Scop &S) {
     isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
     outs() << "Map dump: "; isl_union_map_dump(m);
 
-    isl_union_map_foreach_map(m, workOnMap, &s);
+    //isl_union_map_foreach_map(m, workOnMap, &s);
+    isl_union_map_foreach_map(m, testOnMap, &s);
 
     outs() << "\n ----------------- \n";
 
@@ -42,9 +44,14 @@ bool ScopStatistics::runOnScop(Scop &S) {
   }
 
   int workOnMap(__isl_take isl_map *map, void *user) {
+
+    return 0;
+  }
+
+  int testOnMap(__isl_take isl_map *map, void *user) {
     mapSave* mapS = (mapSave*) user;
     mapS->nparam = isl_map_n_param(map);
-
+  
     return 0;
   }
 
