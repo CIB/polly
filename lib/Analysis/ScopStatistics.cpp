@@ -16,6 +16,10 @@ using namespace polly;
 struct mapSave {
   unsigned nparam;
 } s;
+// struct
+// struct next
+// islmap *depi
+// enum
 
 int workOnMap(__isl_take isl_map *map, void *user);
 int testOnMap(__isl_take isl_map *map, void *user);
@@ -46,6 +50,9 @@ bool ScopStatistics::runOnScop(Scop &S) {
   }
 
   int workOnMap(__isl_take isl_map *map, void *user) {
+    // map constrains 
+    //
+    // 
 
     return 0;
   }
@@ -53,6 +60,7 @@ bool ScopStatistics::runOnScop(Scop &S) {
   int testOnMap(__isl_take isl_map *map, void *user) {
     mapSave* mapS = (mapSave*) user;
     mapS->nparam = isl_map_n_param(map);
+    
   
     return 0;
   }
