@@ -31,7 +31,9 @@ bool ScopStatistics::runOnScop(Scop &S) {
 
     outs() << "\n ----------------- \n";
 
-    outs() << "Some nParam: " << s.nparam;
+    outs() << "Some nParam: " << s.nparam << "\n";
+    
+    outs() << "End of my output \n";
     
     return false;
   }
