@@ -25,10 +25,10 @@ int workOnMap(__isl_take isl_map *map, void *user);
 int testOnMap(__isl_take isl_map *map, void *user);
 
 bool ScopStatistics::runOnScop(Scop &S) {
-    outs() << "<<>>>>>>>>>"  << S.getNameStr() << "\n";
+    outs() << ">>>>>>>>> Run on Scop: "  << S.getNameStr() << "\n";
     Dependences *DE = &getAnalysis<Dependences>();
     isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
-    outs() << "Map dump: "; isl_union_map_dump(m);
+    outs() << "Map dump:\n"; isl_union_map_dump(m);
 
     //isl_union_map_foreach_map(m, workOnMap, &s);
     isl_union_map_foreach_map(m, testOnMap, &s);
