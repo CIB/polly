@@ -57,7 +57,7 @@ bool ScopStatistics::runOnScop(Scop &S) {
   }
 
   int workOnMap(__isl_take isl_map *map, void *user) {
-    mapUnion* mapU = (mapUnion *) user;
+    mapUniform* mapU = (mapUniform *) user;
     (mapU->nMaps)++;
     //isl_set* setFmap = isl_set_from_map(map);
     isl_set* setFdeltas = isl_map_deltas(map);
