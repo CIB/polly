@@ -16,7 +16,11 @@ using namespace polly;
 struct mapSave {
   unsigned nparam;
 } s;
-// struct
+
+struct mapUnion {
+  bool *p;
+} mu;
+
 // struct next
 // islmap *depi
 // enum
@@ -29,8 +33,10 @@ bool ScopStatistics::runOnScop(Scop &S) {
     Dependences *DE = &getAnalysis<Dependences>();
     isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
     outs() << "Map dump:\n"; isl_union_map_dump(m);
+    
+    //mu.p = (bool *) malloc(10*sizeof(bool));//10 to replace with number of maps
 
-    //isl_union_map_foreach_map(m, workOnMap, &s);
+    //isl_union_map_foreach_map(m, workOnMap, &mu);
     isl_union_map_foreach_map(m, testOnMap, &s);
 
     outs() << "\n ----------------- \n";
