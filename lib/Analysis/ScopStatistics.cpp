@@ -16,8 +16,9 @@ using namespace polly;
 struct mapSave {
   unsigned nparam;
 } s;
-
-struct mapUnion {
+// later change to class and add constructor 
+struct mapUniform {
+  int nMaps;
   bool *p;
 } mu;
 
@@ -33,7 +34,7 @@ bool ScopStatistics::runOnScop(Scop &S) {
     Dependences *DE = &getAnalysis<Dependences>();
     isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
     outs() << "Map dump:\n"; isl_union_map_dump(m);
-    
+    //mu.nMaps = 0;
     //mu.p = (bool *) malloc(10*sizeof(bool));//10 to replace with number of maps
 
     //isl_union_map_foreach_map(m, workOnMap, &mu);
@@ -56,9 +57,11 @@ bool ScopStatistics::runOnScop(Scop &S) {
   }
 
   int workOnMap(__isl_take isl_map *map, void *user) {
-    // map constrains 
-    //
-    // 
+    mapUnion* mapU = (mapUnion *) user;
+    (mapU->nMaps)++;
+    //isl_set* setFmap = isl_set_from_map(map);
+    isl_set* setFdeltas = isl_map_deltas(map);
+    isl_dim* dimFdeltas = isl_set_get_dim(setFdeltas);  
 
     return 0;
   }
