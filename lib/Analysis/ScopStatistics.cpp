@@ -9,6 +9,7 @@
 #include "polly/LinkAllPasses.h"
 #include "polly/Dependences.h"
 #include "isl/map.h"
+#include "isl/set.h"
 
 using namespace llvm;
 using namespace polly;
@@ -59,9 +60,11 @@ bool ScopStatistics::runOnScop(Scop &S) {
   int workOnMap(__isl_take isl_map *map, void *user) {
     mapUniform* mapU = (mapUniform *) user;
     (mapU->nMaps)++;
-    //isl_set* setFmap = isl_set_from_map(map);
+    isl_set* setFmap = isl_set_from_map(map);
     isl_set* setFdeltas = isl_map_deltas(map);
     isl_dim* dimFdeltas = isl_set_get_dim(setFdeltas);  
+    isl_int* iInt;
+    isl_set_fast_dim_is_fixed(setFmap, dimFdeltas, iInt);
 
     return 0;
   }
