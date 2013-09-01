@@ -17,15 +17,19 @@ using namespace polly;
 struct mapSave {
   unsigned nparam;
 } s;
-// later change to class and add constructor 
-struct mapUniform {
-  int nMaps;
-  bool *p;
-} mu;
 
-// struct next
-// islmap *depi
-// enum
+class mapUniform {
+
+public:
+  int nMaps;
+  bool* p;
+  mapUniform(bool* bp);
+};
+
+mapUniform::mapUniform(bool* bp) {
+  this->nMaps = 0;
+  this->p = bp;
+}
 
 int workOnMap(__isl_take isl_map *map, void *user);
 int testOnMap(__isl_take isl_map *map, void *user);
@@ -35,8 +39,11 @@ bool ScopStatistics::runOnScop(Scop &S) {
     Dependences *DE = &getAnalysis<Dependences>();
     isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
     outs() << "Map dump:\n"; isl_union_map_dump(m);
+    
+    bool* p = (bool *) malloc(10*sizeof(bool));//10 to replace with number of maps
+    mapUniform* mup = new mapUniform(p);
     //mu.nMaps = 0;
-    //mu.p = (bool *) malloc(10*sizeof(bool));//10 to replace with number of maps
+    
 
     //isl_union_map_foreach_map(m, workOnMap, &mu);
     isl_union_map_foreach_map(m, testOnMap, &s);
@@ -64,7 +71,8 @@ bool ScopStatistics::runOnScop(Scop &S) {
     isl_set* setFdeltas = isl_map_deltas(map);
     isl_dim* dimFdeltas = isl_set_get_dim(setFdeltas);  
     isl_int* iInt;
-    isl_set_fast_dim_is_fixed(setFmap, dimFdeltas, iInt);
+
+    isl_set_fast_dim_is_fixed(setFmap, 0, iInt);
 
     return 0;
   }
