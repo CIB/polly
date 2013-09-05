@@ -18,15 +18,15 @@ struct mapSave {
   unsigned nparam;
 } s;
 
-class mapUniform {
+class MapUniform {
 
 public:
   int nMaps;
   bool* p;
-  mapUniform(bool* bp);
+  MapUniform(bool* bp);
 };
 
-mapUniform::mapUniform(bool* bp) {
+MapUniform::MapUniform(bool* bp) {
   this->nMaps = 0;
   this->p = bp;
 }
@@ -41,7 +41,7 @@ bool ScopStatistics::runOnScop(Scop &S) {
     outs() << "Map dump:\n"; isl_union_map_dump(m);
     
     bool* p = (bool *) malloc(10*sizeof(bool));//10 to replace with number of maps
-    mapUniform* mup = new mapUniform(p);
+    MapUniform* mup = new MapUniform(p);
     //mu.nMaps = 0;
     
 
@@ -65,7 +65,7 @@ bool ScopStatistics::runOnScop(Scop &S) {
   }
 
   int workOnMap(__isl_take isl_map *map, void *user) {
-    mapUniform* mapU = (mapUniform *) user;
+    MapUniform* mapU = (MapUniform *) user;
     (mapU->nMaps)++;
     isl_set* setFmap = isl_set_from_map(map);
     isl_set* setFdeltas = isl_map_deltas(map);
