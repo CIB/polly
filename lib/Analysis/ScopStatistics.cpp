@@ -39,7 +39,7 @@ bool ScopStatistics::runOnScop(Scop &S) {
     Dependences *DE = &getAnalysis<Dependences>();
     isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL); 
     outs() << "Map dump:\n"; isl_union_map_dump(m);
-    
+    //isl_union_map_n_ stuff
     bool* p = (bool *) malloc(10*sizeof(bool));//10 to replace with number of maps
     MapUniform* mup = new MapUniform(p);
     //mu.nMaps = 0;
@@ -54,6 +54,9 @@ bool ScopStatistics::runOnScop(Scop &S) {
     
     outs() << "End of my output \n";
     
+
+
+    //set prints to check output
     return false;
   }
 
@@ -67,27 +70,32 @@ bool ScopStatistics::runOnScop(Scop &S) {
   int workOnMap(__isl_take isl_map *map, void *user) {
     MapUniform* mapU = (MapUniform *) user;
     (mapU->nMaps)++;
-    isl_set* setFmap = isl_set_from_map(map);
+    //isl_set* setFmap = isl_set_from_map(map);
     isl_set* setFdeltas = isl_map_deltas(map);
-    isl_dim* dimFdeltas = isl_set_get_dim(setFdeltas);  
+    //isl_dim* dimFdeltas = isl_set_get_dim(setFdeltas);  
     isl_int* iInt;
 
-    isl_set_fast_dim_is_fixed(setFmap, 0, iInt);
+    // anzahl der dims 
 
+//dim type dim out dim_all
+
+    //isl_set_fast_dim_is_fixed(setFdeltas, 0, iInt);
+    // return bool/int 
+    isl_set_plain_is_fixed(setFdeltas,isl_dim_type,0,iInt);
     return 0;
   }
 
   int testOnMap(__isl_take isl_map *map, void *user) {
-    mapSave* mapS = (mapSave*) user;
-    mapS->nparam = isl_map_n_param(map);
+      mapSave* mapS = (mapSave*) user;
+      mapS->nparam = isl_map_n_param(map);
+      
     
-  
-    return 0;
-  }
+      return 0;
+    }
 
-  char ScopStatistics::ID = 0;
+    char ScopStatistics::ID = 0;
 
-  Pass *polly::createScopStatisticsPass() {return new ScopStatistics(); }
+    Pass *polly::createScopStatisticsPass() {return new ScopStatistics(); }
 
   INITIALIZE_PASS_BEGIN(ScopStatistics, "polly-stat","Polly - get stats", false, false);
   INITIALIZE_PASS_END(ScopStatistics, "polly-stat","Polly - get stats", false, false);
