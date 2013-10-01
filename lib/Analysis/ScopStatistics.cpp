@@ -46,8 +46,8 @@ bool ScopStatistics::runOnScop(Scop &S) {
     //mu.nMaps = 0;
     
 
-    //isl_union_map_foreach_map(m, workOnMap, &mu);
-    isl_union_map_foreach_map(m, testOnMap, &s);
+    isl_union_map_foreach_map(m, workOnMap, &mup);
+    //isl_union_map_foreach_map(m, testOnMap, &s);
 
     outs() << "\n ----------------- \n";
     outs() << "Some nParam: " << s.nparam << "\n";
