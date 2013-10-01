@@ -55,7 +55,7 @@ bool ScopStatistics::runOnScop(Scop &S) {
     outs() << "\n ----------------- \n";
     outs() << "uniform output \n";
     outs() << mup->nMaps << "were found \n";
-    for(i = 0,i < mup->nMaps; i++;){
+    for(i = 0;i < mup->nMaps; i++){
       if(mup->p[i] == true) {
         outs() << "true ";
       } else {
