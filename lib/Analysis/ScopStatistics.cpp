@@ -10,6 +10,7 @@
 #include "polly/Dependences.h"
 #include "isl/map.h"
 #include "isl/set.h"
+#include <vector>
 
 using namespace llvm;
 using namespace polly;
@@ -22,13 +23,13 @@ class MapUniform {
 
 public:
   int nMaps;
-  bool* p;
-  MapUniform(bool* bp);
+  std::vector<bool> p;
+  MapUniform();
 };
 
-MapUniform::MapUniform(bool* bp) {
+MapUniform::MapUniform() {
   this->nMaps = 0;
-  this->p = bp;
+  //this->p = bp;
 }
 
 int workOnMap(__isl_take isl_map *map, void *user);
@@ -41,8 +42,9 @@ bool ScopStatistics::runOnScop(Scop &S) {
     int i;
     outs() << "Map dump:\n"; isl_union_map_dump(m);
     //isl_union_map_n_ stuff
-    bool* p = (bool *) malloc(10*sizeof(bool));//10 to replace with number of maps
-    MapUniform* mup = new MapUniform(p);
+    //int j = isl_union_map_n_map(m);
+    //bool* p = (bool *) malloc(j*sizeof(bool));//10 to replace with number of maps
+    MapUniform* mup = new MapUniform();
     //mu.nMaps = 0;
     
 
@@ -82,11 +84,25 @@ bool ScopStatistics::runOnScop(Scop &S) {
   int workOnMap(__isl_take isl_map *map, void *user) {
     int i;
     bool earlyStop = false;
+    unsigned j;
     isl_int iInt;
     
     isl_int_init(iInt);
 
     MapUniform* mapU = (MapUniform *) user;
+
+
+    outs() << "IN " << isl_map_dim(map,isl_dim_in) << "OUT " << isl_map_dim(map,isl_dim_out) << "\n";
+
+    int in = isl_map_dim(map,isl_dim_in);
+    int out = isl_map_dim(map,isl_dim_out); 
+
+    if(in != out) {
+      mapU->p.push_back(false);
+      mapU->nMaps++;
+      return 0; 
+    }
+
     //isl_set* setFmap = isl_set_from_map(map);
     isl_set* setFdeltas = isl_map_deltas(map);
     //isl_dim* dimFdeltas = isl_set_get_dim(setFdeltas);  
@@ -94,22 +110,23 @@ bool ScopStatistics::runOnScop(Scop &S) {
     // anzahl der dims 
 
 //dim type dim out dim_all
+    j = isl_set_dim(setFdeltas, isl_dim_all);
 
     // warscheinlich i isl_int 
     // isl_int_set_si(iInt,0) , () , isl_int_add_ui(iInt,1)
-    for(i = 0;i < 10;i++) {
+    for(i = 0;i < j;i++) {
       //isl_set_fast_dim_is_fixed(setFdeltas, 0, iInt);
       // return bool/int 
-      // isl_int_set_si(iInt,1);
-      if(isl_set_fast_dim_is_fixed(setFdeltas, isl_dim_all, &iInt) == 0) {
-        mapU->p[mapU->nMaps] = false;
+      isl_int_set_si(iInt,i);
+      if(!isl_set_fast_dim_is_fixed(setFdeltas, isl_dim_all, &iInt)) {
+        mapU->p.push_back(false);
         mapU->nMaps++;
         earlyStop = true;
         break;      
       }
     }
     if(!earlyStop) {
-      mapU->p[mapU->nMaps] = true;
+      mapU->p.push_back(true);
       mapU->nMaps++;
     }
 
