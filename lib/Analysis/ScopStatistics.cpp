@@ -82,9 +82,7 @@ bool ScopStatistics::runOnScop(Scop &S) {
   }
 
   int workOnMap(__isl_take isl_map *map, void *user) {
-    int i;
-    bool earlyStop = false;
-    unsigned j;
+    unsigned i,j;
     isl_int iInt;
     
     isl_int_init(iInt);
@@ -109,26 +107,20 @@ bool ScopStatistics::runOnScop(Scop &S) {
 
     // anzahl der dims 
 
-//dim type dim out dim_all
+    //dim type dim out dim_all
     j = isl_set_dim(setFdeltas, isl_dim_all);
 
-    // warscheinlich i isl_int 
-    // isl_int_set_si(iInt,0) , () , isl_int_add_ui(iInt,1)
     for(i = 0;i < j;i++) {
       //isl_set_fast_dim_is_fixed(setFdeltas, 0, iInt);
-      // return bool/int 
       isl_int_set_si(iInt,i);
       if(!isl_set_fast_dim_is_fixed(setFdeltas, isl_dim_all, &iInt)) {
         mapU->p.push_back(false);
         mapU->nMaps++;
-        earlyStop = true;
-        break;      
+        return 0;      
       }
     }
-    if(!earlyStop) {
-      mapU->p.push_back(true);
-      mapU->nMaps++;
-    }
+    mapU->p.push_back(true);
+    mapU->nMaps++;
 
     //isl_set_plain_is_fixed(setFdeltas,isl_dim_type,0,iInt);
     isl_int_clear(iInt);
