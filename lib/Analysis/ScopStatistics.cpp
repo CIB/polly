@@ -42,7 +42,7 @@ bool ScopStatistics::runOnScop(Scop &S) {
   int i;
   MapUniform *mup = new MapUniform();
 
-  isl_union_map_foreach_map(m, workOnMap, &mup);
+  isl_union_map_foreach_map(m, workOnMap, mup);
 
   outs() << "\n ----------------- \n";
   outs() << "Some nParam: " << s.nparam << "\n";
@@ -83,12 +83,12 @@ int workOnMap(__isl_take isl_map *map, void *user) {
   int in = isl_map_dim(map, isl_dim_in);
   int out = isl_map_dim(map, isl_dim_out);
 
-  //outs() << "MAP DUMP\n";
-  //isl_map_dump(map);
-  //outs() << "\n";
+  // outs() << "MAP DUMP\n";
+  // isl_map_dump(map);
+  // outs() << "\n";
   if (in != out) {
-  //  mapU->p.push_back(false);
-  //  mapU->nMaps++;
+    mapU->p.push_back(false);
+    mapU->nMaps = (mapU->nMaps++);
     isl_map_free(map);
     isl_int_clear(iInt);
     return 0;
@@ -98,24 +98,24 @@ int workOnMap(__isl_take isl_map *map, void *user) {
   newMap = isl_map_reset_tuple_id(newMap, isl_dim_in);
   newMap = isl_map_reset_tuple_id(newMap, isl_dim_out);
 
-  isl_set *setFdeltas = isl_map_deltas(newMap); 
+  isl_set *setFdeltas = isl_map_deltas(newMap);
   j = isl_set_dim(setFdeltas, isl_dim_all);
 
   outs() << "isl_set_dims: " << j << "\n";
   for (i = 0; i < j; i++) {
     if (!isl_set_fast_dim_is_fixed(setFdeltas, i, &iInt)) {
-      outs() << "constant dim: " << i;
-      outs() << "\n";
       mapU->p.push_back(false);
-      mapU->nMaps++;
+      mapU->nMaps = (mapU->nMaps++);
       isl_map_free(map);
       isl_set_free(setFdeltas);
       isl_int_clear(iInt);
       return 0;
     }
+    outs() << "constant dim: " << i;
+    outs() << "\n";
   }
   mapU->p.push_back(true);
-  mapU->nMaps++;
+  mapU->nMaps = (mapU->nMaps++);
 
   isl_map_free(map);
   isl_set_free(setFdeltas);
