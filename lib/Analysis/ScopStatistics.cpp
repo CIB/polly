@@ -45,11 +45,8 @@ bool ScopStatistics::runOnScop(Scop &S) {
     //int j = isl_union_map_n_map(m);
     //bool* p = (bool *) malloc(j*sizeof(bool));//10 to replace with number of maps
     MapUniform* mup = new MapUniform();
-    //mu.nMaps = 0;
-    
 
     isl_union_map_foreach_map(m, workOnMap, &mup);
-    //isl_union_map_foreach_map(m, testOnMap, &s);
 
     outs() << "\n ----------------- \n";
     outs() << "Some nParam: " << s.nparam << "\n";
@@ -66,16 +63,10 @@ bool ScopStatistics::runOnScop(Scop &S) {
     }
     outs() << "\n";
 
-    outs() << "End of my output \n";
-    
-
-
-    //set prints to check output
     return false;
   }
 
   void ScopStatistics::getAnalysisUsage(AnalysisUsage &AU) const {
-    //AU.addRequired<AliasAnalysis>();
     AU.addRequired<Dependences>();
     AU.addRequired<ScopInfo>();
     AU.setPreservesAll();
