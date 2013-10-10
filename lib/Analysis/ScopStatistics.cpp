@@ -86,6 +86,9 @@ bool ScopStatistics::runOnScop(Scop &S) {
     int in = isl_map_dim(map,isl_dim_in);
     int out = isl_map_dim(map,isl_dim_out); 
 
+    outs() << "MAP DUMP\n";
+    isl_map_dump(map);
+    outs() << "\n";
     if(in != out) {
       mapU->p.push_back(false);
       mapU->nMaps++;
