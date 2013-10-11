@@ -560,6 +560,16 @@ static bool regionWithoutLoops(Region &R, LoopInfo *LI) {
   return true;
 }
 
+
+// Purge the children of the region R from the set Regs.
+template <typename Container>
+static void purgeChildren(Container &Regs, const Region *R) {
+  for (Region::const_iterator I = R->begin(), E = R->end(); I != E; ++I) {
+    Regs.erase(*I);
+    purgeChildren(Regs, *I);
+  }
+}
+
 void ScopDetection::findScops(Region &R) {
 
   if (!DetectRegionsWithoutLoops && regionWithoutLoops(R, LI))
@@ -616,16 +626,8 @@ void ScopDetection::findScops(Region &R) {
     ValidRegions.insert(ExpandedR);
     ValidRegions.erase(CurrentRegion);
 
-    if (Context.RejectLog.size() > 0)
-      RejectLog[&R] = Context.RejectLog;
-
-    for (Region::iterator I = ExpandedR->begin(), E = ExpandedR->end(); I != E;
-         ++I) {
-      ValidRegions.erase(*I);
-
-      if (RejectLog.count(*I))
-        RejectLog.erase(*I);
-    }
+    purgeChildren(ValidRegions, ExpandedR);
+    purgeChildren(RejectLog, ExpandedR);
   }
 }
 
