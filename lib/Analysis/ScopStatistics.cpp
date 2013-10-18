@@ -29,7 +29,6 @@ public:
 
 MapUniform::MapUniform() {
   this->nMaps = 0;
-  // this->p = bp;
 }
 
 int workOnMap(__isl_take isl_map *map, void *user);
@@ -45,11 +44,8 @@ bool ScopStatistics::runOnScop(Scop &S) {
   isl_union_map_foreach_map(m, workOnMap, mup);
 
   outs() << "\n ----------------- \n";
-  outs() << "Some nParam: " << s.nparam << "\n";
-
-  outs() << "\n ----------------- \n";
   outs() << "uniform output \n";
-  outs() << mup->nMaps << "were found \n";
+  outs() << mup->nMaps << " were found on this union_map \n";
   for (i = 0; i < mup->nMaps; i++) {
     if (mup->p[i] == true) {
       outs() << "true ";
@@ -75,6 +71,7 @@ int workOnMap(__isl_take isl_map *map, void *user) {
   isl_map *newMap;
   isl_int_init(iInt);
 
+  outs() << "----------\n";
   MapUniform *mapU = (MapUniform *)user;
 
   outs() << "IN " << isl_map_dim(map, isl_dim_in) << "OUT "
@@ -83,9 +80,6 @@ int workOnMap(__isl_take isl_map *map, void *user) {
   int in = isl_map_dim(map, isl_dim_in);
   int out = isl_map_dim(map, isl_dim_out);
 
-  // outs() << "MAP DUMP\n";
-  // isl_map_dump(map);
-  // outs() << "\n";
   if (in != out) {
     mapU->p.push_back(false);
     mapU->nMaps = (mapU->nMaps++);
