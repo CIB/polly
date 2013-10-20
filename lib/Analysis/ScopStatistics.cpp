@@ -21,10 +21,6 @@ STATISTIC(AffineScops, "Number of the Scops witch are affine");
 STATISTIC(UniformMaps, "Number of the Maps witch are uniform");
 STATISTIC(AffineMaps, "Number of the Maps witch are affine");
 
-struct mapSave {
-  unsigned nparam;
-} s;
-
 class MapUniform {
 
 public:
