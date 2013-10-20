@@ -1,5 +1,6 @@
 #define DEBUG_TYPE "polly-stat"
 
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 #include "polly/ScopStatistics.h"
 #include "polly/ScopPass.h"
@@ -11,7 +12,6 @@
 #include "isl/map.h"
 #include "isl/set.h"
 #include <vector>
-#include "llvm/ADT/Statistic.h"
 
 using namespace llvm;
 using namespace polly;
@@ -41,9 +41,9 @@ bool ScopStatistics::runOnScop(Scop &S) {
   // set output to true for debug info
   output = false;
 
+  int i;
   Dependences *DE = &getAnalysis<Dependences>();
   isl_union_map *m = DE->getDependences(Dependences::TYPE_ALL);
-  int i;
   MapUniform *mup = new MapUniform();
   
   if(output)
@@ -51,9 +51,9 @@ bool ScopStatistics::runOnScop(Scop &S) {
   isl_union_map_foreach_map(m, workOnMap, mup);
   for(i=0; i < mup->nMaps; i++) {
     if(mup->p[i] == false)
-      AffineScops++;
+      ++AffineScops;
     if(i == ((mup->nMaps)-1))
-      UniformScops++;
+      ++UniformScops;
   }
 
   if(output) {
@@ -98,7 +98,7 @@ int workOnMap(__isl_take isl_map *map, void *user) {
 
   if (in != out) {
     mapU->p.push_back(false);
-    mapU->nMaps = (mapU->nMaps++);
+    mapU->nMaps = (mapU->nMaps)+1;
     isl_map_free(map);
     isl_int_clear(iInt);
     return 0;
@@ -116,8 +116,8 @@ int workOnMap(__isl_take isl_map *map, void *user) {
   for (i = 0; i < j; i++) {
     if (!isl_set_fast_dim_is_fixed(setFdeltas, i, &iInt)) {
       mapU->p.push_back(false);
-      mapU->nMaps = (mapU->nMaps++);
-      AffineMaps++;
+      mapU->nMaps = (mapU->nMaps)+1;
+      ++AffineMaps;
       isl_map_free(map);
       isl_set_free(setFdeltas);
       isl_int_clear(iInt);
@@ -127,8 +127,8 @@ int workOnMap(__isl_take isl_map *map, void *user) {
       outs() << "constant dim: " << i  << "\n";
   }
   mapU->p.push_back(true);
-  mapU->nMaps = (mapU->nMaps++);
-  UniformMaps++;
+  mapU->nMaps = (mapU->nMaps)+1;
+  ++UniformMaps;
 
   isl_map_free(map);
   isl_set_free(setFdeltas);
