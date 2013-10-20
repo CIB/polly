@@ -11,9 +11,15 @@
 #include "isl/map.h"
 #include "isl/set.h"
 #include <vector>
+#include "llvm/ADT/Statistic.h"
 
 using namespace llvm;
 using namespace polly;
+
+STATISTIC(UniformScops, "Number of the Scops witch are uniform");
+STATISTIC(AffineScops, "Number of the Scops witch are affine");
+STATISTIC(UniformMaps, "Number of the Maps witch are uniform");
+STATISTIC(AffineMaps, "Number of the Maps witch are affine");
 
 struct mapSave {
   unsigned nparam;
@@ -47,6 +53,12 @@ bool ScopStatistics::runOnScop(Scop &S) {
   if(output)
     outs() << "Start working on union_map\n";
   isl_union_map_foreach_map(m, workOnMap, mup);
+  for(i=0; i < mup->nMaps; i++) {
+    if(mup->p[i] == false)
+      AffineScops++;
+    if(i == ((mup->nMaps)-1))
+      UniformScops++;
+  }
 
   if(output) {
     outs() << "Uniform output \n";
@@ -109,6 +121,7 @@ int workOnMap(__isl_take isl_map *map, void *user) {
     if (!isl_set_fast_dim_is_fixed(setFdeltas, i, &iInt)) {
       mapU->p.push_back(false);
       mapU->nMaps = (mapU->nMaps++);
+      AffineMaps++;
       isl_map_free(map);
       isl_set_free(setFdeltas);
       isl_int_clear(iInt);
@@ -119,6 +132,7 @@ int workOnMap(__isl_take isl_map *map, void *user) {
   }
   mapU->p.push_back(true);
   mapU->nMaps = (mapU->nMaps++);
+  UniformMaps++;
 
   isl_map_free(map);
   isl_set_free(setFdeltas);
@@ -133,4 +147,4 @@ Pass *polly::createScopStatisticsPass() { return new ScopStatistics(); }
 INITIALIZE_PASS_BEGIN(ScopStatistics, "polly-stat", "Polly - get stats", false,
                       false);
 INITIALIZE_PASS_END(ScopStatistics, "polly-stat", "Polly - get stats", false,
-                    false);
+                    false)
