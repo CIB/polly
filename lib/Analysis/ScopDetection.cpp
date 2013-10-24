@@ -354,13 +354,22 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
   if (isa<UndefValue>(BaseValue))
     return invalid<ReportUndefBasePtr>(Context, /*Assert=*/true);
 
-  // Check that the base address of the access is invariant in the current
-  // region.
-  if (!isInvariant(*BaseValue, Context.CurRegion))
-    // Verification of this property is difficult as the independent blocks
-    // pass may introduce aliasing that we did not have when running the
-    // scop detection.
-    return invalid<ReportVariantBasePtr>(Context, /*Assert=*/false, BaseValue);
+  // Check that the base address of the access is
+  // invariant in the current region or the base
+  // address is itself a valid load from an array
+  // (i.e., we have a multi-dimensional array represented
+  // by pointer to pointer).
+  if (!isInvariant(*BaseValue, Context.CurRegion)) {
+    // The base is not invariant. Check if it is a load
+    // from an array (like A[i]) and we have a
+    // pointer to pointer multi-dimensional array.
+    if (LoadInst *Ld = dyn_cast<LoadInst>(BaseValue)) {
+      if (!isValidMemoryAccess(*Ld, Context))
+        return invalid<ReportVariantBasePtr>(Context, /*Assert=*/true,
+                                             BaseValue);
+    } else
+      return invalid<ReportVariantBasePtr>(Context, /*Assert=*/true, BaseValue);
+  }
 
   AccessFunction = SE->getMinusSCEV(AccessFunction, BasePointer);
 
