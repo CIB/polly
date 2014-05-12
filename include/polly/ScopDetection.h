@@ -139,7 +139,7 @@ class ScopDetection : public FunctionPass {
   /// @param Context The context of scop detection.
   ///
   /// @return True if all blocks in R are valid, false otherwise.
-  bool allBlocksValid(DetectionContext &Context) const;
+  bool allBlocksValid(DetectionContext &Context, bool& UsedPointerToPointer) const;
 
   /// @brief Check the exit block of a region is valid.
   ///
@@ -183,7 +183,7 @@ class ScopDetection : public FunctionPass {
   /// @param Context The context of scop detection.
   ///
   /// @return True if the memory access is valid, false otherwise.
-  bool isValidMemoryAccess(Instruction &Inst, DetectionContext &Context) const;
+  bool isValidMemoryAccess(Instruction &Inst, DetectionContext &Context, bool& UsedPointerToPointer) const;
 
   /// @brief Check if an instruction has any non trivial scalar dependencies
   ///        as part of a Scop.
@@ -201,7 +201,7 @@ class ScopDetection : public FunctionPass {
   /// @param Context The context of scop detection.
   ///
   /// @return True if the instruction is valid, false otherwise.
-  bool isValidInstruction(Instruction &Inst, DetectionContext &Context) const;
+  bool isValidInstruction(Instruction &Inst, DetectionContext &Context, bool& UsedPointerToPointer) const;
 
   /// @brief Check if the control flow in a basic block is valid.
   ///

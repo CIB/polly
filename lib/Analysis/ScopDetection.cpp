@@ -136,6 +136,7 @@ bool polly::PollyDelinearize = false;
 // Statistics.
 
 STATISTIC(ValidRegion, "Number of regions that a valid part of Scop");
+STATISTIC(PointerToPointer, "Number of regions that were detected due to pointer-to-pointer detection.");
 
 class DiagnosticScopFound : public DiagnosticInfo {
 private:
@@ -367,7 +368,7 @@ ScopDetection::hasNonAffineMemoryAccesses(DetectionContext &Context) const {
 }
 
 bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
-                                        DetectionContext &Context) const {
+                                        DetectionContext &Context, bool& UsedPointerToPointer) const {
   Value *Ptr = getPointerOperand(Inst);
   Loop *L = LI->getLoopFor(Inst.getParent());
   const SCEV *AccessFunction = SE->getSCEVAtScope(Ptr, L);
@@ -394,9 +395,11 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
     // from an array (like A[i]) and we have a
     // pointer to pointer multi-dimensional array.
     if (LoadInst *Ld = dyn_cast<LoadInst>(BaseValue)) {
-      if (!isValidMemoryAccess(*Ld, Context))
+      if (!isValidMemoryAccess(*Ld, Context, UsedPointerToPointer))
         return invalid<ReportVariantBasePtr>(Context, /*Assert=*/true,
                                              BaseValue);
+      else
+        UsedPointerToPointer = true;
     } else
       return invalid<ReportVariantBasePtr>(Context, /*Assert=*/true, BaseValue);
   }
@@ -449,7 +452,7 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
 }
 
 bool ScopDetection::isValidInstruction(Instruction &Inst,
-                                       DetectionContext &Context) const {
+                                       DetectionContext &Context, bool& UsedPointerToPointer) const {
   if (PHINode *PN = dyn_cast<PHINode>(&Inst))
     if (!canSynthesize(PN, LI, SE, &Context.CurRegion)) {
       if (SCEVCodegen)
@@ -477,7 +480,7 @@ bool ScopDetection::isValidInstruction(Instruction &Inst,
 
   // Check the access function.
   if (isa<LoadInst>(Inst) || isa<StoreInst>(Inst))
-    return isValidMemoryAccess(Inst, Context);
+    return isValidMemoryAccess(Inst, Context, UsedPointerToPointer);
 
   // We do not know this instruction, therefore we assume it is invalid.
   return invalid<ReportUnknownInst>(Context, /*Assert=*/true, &Inst);
@@ -516,7 +519,8 @@ Region *ScopDetection::expandRegion(Region &R) {
       // If the exit is valid check all blocks
       //  - if true, a valid region was found => store it + keep expanding
       //  - if false, .tbd. => stop  (should this really end the loop?)
-      if (!allBlocksValid(Context))
+      bool UsedPointerToPointer;
+      if (!allBlocksValid(Context, UsedPointerToPointer))
         break;
 
       // Delete unnecessary regions (allocated by getExpandedRegion)
@@ -529,6 +533,10 @@ Region *ScopDetection::expandRegion(Region &R) {
 
       // Create and test the next greater region (if any)
       ExpandedRegion = ExpandedRegion->getExpandedRegion();
+      
+      if(UsedPointerToPointer) {
+        PointerToPointer++;
+      }
 
     } else {
       // Create and test the next greater region (if any)
@@ -625,7 +633,7 @@ void ScopDetection::findScops(Region &R) {
   }
 }
 
-bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
+bool ScopDetection::allBlocksValid(DetectionContext &Context, bool& UsedPointerToPointer) const {
   Region &R = Context.CurRegion;
 
   for (const BasicBlock *BB : R.blocks()) {
@@ -640,7 +648,7 @@ bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
 
   for (BasicBlock *BB : R.blocks())
     for (BasicBlock::iterator I = BB->begin(), E = --BB->end(); I != E; ++I)
-      if (!isValidInstruction(*I, Context))
+      if (!isValidInstruction(*I, Context, UsedPointerToPointer))
         return false;
 
   if (hasNonAffineMemoryAccesses(Context))
@@ -711,8 +719,13 @@ bool ScopDetection::isValidRegion(DetectionContext &Context) const {
   if (!isValidExit(Context))
     return false;
 
-  if (!allBlocksValid(Context))
+  bool UsedPointerToPointer = false;
+  if (!allBlocksValid(Context, UsedPointerToPointer))
     return false;
+
+  if (UsedPointerToPointer) {
+    PointerToPointer++;
+  }
 
   DEBUG(dbgs() << "OK\n");
   return true;
