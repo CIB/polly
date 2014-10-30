@@ -270,6 +270,7 @@ set (ISL_FILES
 
 add_polly_library(Polly
   Analysis/DependenceInfo.cpp
+  Analysis/EWPTAliasAnalysis.cpp
   Analysis/ScopDetection.cpp
   Analysis/ScopDetectionDiagnostic.cpp
   Analysis/ScopInfo.cpp
