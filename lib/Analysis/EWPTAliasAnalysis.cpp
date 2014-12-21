@@ -144,11 +144,19 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
          *
          * For instance, we could embed the space (x_1, x_2) into the space (y_1, y_2, y_3)
          * with a mapping { (x_1, x_2) -> (x_1, x_2, _)
+         *
+         * Offset specifies from which index we should start embedding in the larger space. For instance,
+         * if the offset is 1, then x_1 in the smaller space will be mapped to x_2 in the larger space
+         * and so on.
          */
-        isl_basic_map *constructEmbedderMapping(unsigned FromSize, unsigned ToSize, unsigned Offset) {
+        isl_basic_map *constructEmbedderMapping(unsigned FromSize, unsigned ToSize, unsigned Offset = 0) {
+            // Create the basic mapping itself
             auto EmbedderSpace = isl_space_alloc(IslContext, 0, FromSize, ToSize);
             auto EmbedderMapping = isl_basic_map_universe(EmbedderSpace);
 
+            // Generate constraints that map each variable in the smaller space to the corresponding
+            // variable in the larger space.
+            // Some variables in the larger space will not be constrained.
             auto ConstraintSpace = isl_local_space_from_space(EmbedderSpace);
             for(unsigned VariableIndex = 0; VariableIndex < FromSize; VariableIndex++) {
                 auto Constraint = isl_equality_alloc(isl_local_space_copy(ConstraintSpace));
@@ -161,21 +169,95 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             return EmbedderMapping;
         }
 
-        isl_basic_map *generateAliasConstraints(EWPTEntry& LeftHand, EWPTEntry& RightHand) {
-            if(PossibleAlias.SourceLocation != LeftHandEntry->SourceLocation) {
-                continue;
+        /**
+         * Generate a set of constraints for the subscript parameters of LeftHand under which
+         * the heap object matches a heap object in RightHand.
+         */
+        isl_basic_set *generateAliasConstraints(EWPTEntry& LeftHand, EWPTEntry& RightHand) {
+            if(LeftHand.SourceLocation != RightHand.SourceLocation) {
+                auto IndexSpace = isl_space_alloc(IslContext, LeftHand.Depth, 0, 0);
+                return isl_basic_set_empty(IndexSpace);
             }
 
-            // We have a_1, ..., a_k representing our p. Intersect our possible alias with this p.
-            auto AliasMapping = isl_basic_map_intersect_range(PossibleAlias.Mapping, isl_basic_map_range(LeftHandEntry->Mapping));
+            // Constrain the LeftHand mapping to those indices where it might map to a heap object in RightHand
+            auto AliasMapping = isl_basic_map_intersect_range(LeftHand.Mapping, isl_basic_map_range(RightHand.Mapping));
 
-            // We now have constrained our possible mapping to indices that alias our p.
-            // Get a set representing the vectors x_1, ..., x_d that we need to apply as subscripts
-            // to our possible mapping to get to q.
-
+            // Extract the indices in this new constrained mapping as a set.
             auto AliasSet = isl_basic_map_domain(AliasMapping);
+            return AliasSet;
         }
 
+        /**
+         * This function handles the meat of the transfer function p[x] = q
+         *
+         * With p[x] = q, what happens is the following:
+         * - We look at each EWPT entry r pointing to p given some constraints
+         * - We look at each EWPT entry s starting at q
+         * - We create a new EWPT entry, combining the subscripts of r with a new subscript for x and the subscripts of s
+         * - In this new EWPT entry, we apply the constraints for the subscripts of r to point to p
+         * - We also carry over all the constraints for the subscripts of s
+         * - We also add a constraint for x
+         */
+        EWPTEntry generateEntryFromHeapAssignment(int EntranceDepth, isl_basic_set *EntranceConstraints, EWPTEntry& AssigneeMapping, llvm::ConstantInt *BridgeValue) {
+            // The new mapping will have the following subscripts:
+            // - The subscripts from the entrance mapping
+            // - One subscript for the bridge
+            // - The subscripts from the assignee mapping
+            auto InputSize = EntranceDepth + 1 + AssigneeMapping.Depth;
+            auto NewSpace = isl_space_alloc(IslContext, 0, InputSize, AssigneeMapping.AmountOfIterators);
+            auto NewMapping = isl_basic_map_universe(NewSpace);
+
+            // Embed subscript parameters (x_1, ..., x_d) of our entrance mapping into the domain space.
+            // For this we need to create a map (x_1, ..., x_d) -> (x_1, ..., x_d,  ...)
+
+            // First we need to convert our set of constraints for the entrance mapping into a set of constraints
+            // for the larger space of the new mapping. For this, we create an embedder mapping, which is just
+            // an identity function from the smaller space into the larger space.
+            auto AliasSetSize = isl_space_dim(isl_basic_set_get_space(EntranceConstraints), isl_dim_set);
+            auto EmbedderMapping = constructEmbedderMapping(AliasSetSize, InputSize);
+            auto FilterSpace = isl_basic_set_apply(EntranceConstraints, EmbedderMapping);
+
+            // Now we intersect our constraints for (x_1, ..., x_d) with the mapping, effectively adding these
+            // constraints to the mapping we're generating.
+            NewMapping = isl_basic_map_intersect_domain(NewMapping, FilterSpace);
+
+            // Next we add a bridge constraint to our mapping. The bridge constraint is the constraint for
+            // 'x' in the expression p[x] = q
+            auto BridgeConstraint = isl_equality_alloc(isl_local_space_from_space(NewSpace));
+            BridgeConstraint = isl_constraint_set_coefficient_si(BridgeConstraint, isl_dim_in, EntranceDepth, 1);
+            BridgeConstraint = isl_constraint_set_constant_si(BridgeConstraint, BridgeValue->getSExtValue());
+            NewMapping = isl_basic_map_add_constraint(NewMapping, BridgeConstraint);
+
+            isl_basic_map_free(EmbedderMapping);
+
+            // We need to embed the constraints of the asignee mapping into the mapping we're generating.
+            // The assignee mapping has a range of (y_1, ..., y_k). We need the range to be our larger space,
+            // so we simply prepend a projection to the assignee mapping, which projects
+            // (x_1, ..., x_d, b, y_1, ..., y_k) to (y_1, ..., y_k). We can create this projection mapping
+            // by inverting the equivalent embedder mapping that goes from
+            // (y_1, ..., y_k) to (x_1, ..., x_d, b, y_1, ..., y_k)
+            EmbedderMapping = constructEmbedderMapping(AssigneeMapping.Depth, InputSize, EntranceDepth + 1);
+            EmbedderMapping = isl_basic_map_reverse(EmbedderMapping);
+            // concatenate the functions: apply_domain(f, g) = f(g)
+            auto EmbeddedAssigneeMapping = isl_basic_map_apply_domain(AssigneeMapping.Mapping, EmbedderMapping);
+
+            // Now intersect this tail part into our generated mapping, essentially adding the constraints for
+            // (y_1, ..., y_k)
+            NewMapping = isl_basic_map_intersect(NewMapping, EmbeddedAssigneeMapping);
+
+            // Construct the EWPTEntry instance for the generated mapping.
+            EWPTEntry NewEntry;
+            NewEntry.AmountOfIterators = AssigneeMapping.AmountOfIterators;
+            NewEntry.SourceLocation = AssigneeMapping.SourceLocation;
+            NewEntry.Depth = InputSize;
+            NewEntry.Mapping = NewMapping;
+            return NewEntry;
+        }
+
+        /**
+         * Handle a heap assignment that involves a GEP, so something of the form
+         * p[x] = q, where the address p[x] is calculated through a GEP instruction.
+         */
         void handleGEPHeapAssignment(GetElementPtrInst *TargetGEP, llvm::Value *AssignedValue) {
             if(TargetGEP->getNumIndices() != 1) {
                 // We can't deal with any number of indices but one.
@@ -183,6 +265,10 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             }
 
             llvm::Value *Index = TargetGEP->idx_begin()->get();
+            auto ConstantIndex = dyn_cast<llvm::ConstantInt>(Index);
+            if(!ConstantIndex) {
+                return; // TODO Error Handling
+            }
             llvm::Value *BasePointer = TargetGEP->getPointerOperand()->stripPointerCasts();
 
             // Check that we have an EWPT root associated with our base pointer.
@@ -191,10 +277,10 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             }
 
             // Get all EWPT entries of depth 0.
-            std::vector<EWPTEntry*> LeftHandEntries;
+            std::vector<EWPTEntry*> ModifiedHeapObjects;
             for(EWPTEntry& Entry : trackedRoots[BasePointer].Entries) {
                 if(Entry.Depth == 0) {
-                    LeftHandEntries.push_back(&Entry);
+                    ModifiedHeapObjects.push_back(&Entry);
                 }
             }
 
@@ -203,59 +289,20 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             // Concatenate the found mapping under this set of constraints
             // with the EWPT of q
 
-            for(EWPTEntry* LeftHandEntry : LeftHandEntries) {
+            for(EWPTEntry* ModifiedHeapObject : ModifiedHeapObjects) {
                 for(auto& RootPair : trackedRoots) {
                     EWPTRoot& RootMapping = RootPair.second;
                     for(EWPTEntry& PossibleAlias : RootMapping.Entries) {
-                        if(PossibleAlias.SourceLocation != LeftHandEntry->SourceLocation) {
+                        auto EntranceConstraints = generateAliasConstraints(PossibleAlias, *ModifiedHeapObject);
+                        if(isl_basic_set_is_empty(EntranceConstraints)) {
                             continue;
                         }
-
-                        // We have a_1, ..., a_k representing our p. Intersect our possible alias with this p.
-                        auto AliasMapping = isl_basic_map_intersect_range(PossibleAlias.Mapping, isl_basic_map_range(LeftHandEntry->Mapping));
-
-                        // We now have constrained our possible mapping to indices that alias our p.
-                        // Get a set representing the vectors x_1, ..., x_d that we need to apply as subscripts
-                        // to our possible mapping to get to q.
-
-                        auto AliasSet = isl_basic_map_domain(AliasMapping);
 
                         // Now build new mappings from our set for aliasing x_1, ..., x_d, the
                         // transition subscript x_{d+1} = x, and each EWPT in q
 
-                        for(EWPTEntry& RightHandEntry : trackedRoots[AssignedValue].Entries) {
-                            auto InputSize = PossibleAlias.Depth + 1 + RightHandEntry.Depth;
-                            auto NewSpace = isl_space_alloc(IslContext, 0, InputSize, RightHandEntry.AmountOfIterators);
-                            // (x_1, ..., x_d, x_t, y_1, ..., y_n) -> (a_1, ..., a_k)
-                            // x_1, ..., x_d in AliasSet (INTERSECT DOMAIN)
-                            // x_t = e
-                            // (y_1, ..., y_n) -> (a_1, ..., a_k) in RightHandEntry (INTERSECT WITH MAP)
-                            auto NewMapping = isl_basic_map_universe(NewSpace);
-
-                            // Embed Alias Set of parameters x_1, ... x_d into our domain space, that is, x_1, ..., x_d, x_t, y_1, ..., y_n
-                            // For this we need to create a map (x_1, ..., x_d) -> (x_1, ..., y_n)
-                            auto AliasSetSize = isl_space_dim(isl_basic_set_get_space(AliasSet), isl_dim_set);
-
-                            auto EmbedderMapping = constructEmbedderMapping(AliasSetSize, InputSize, 0);
-                            auto FilterSpace = isl_basic_set_apply(AliasSet, EmbedderMapping);
-                            NewMapping = isl_basic_map_intersect_domain(NewMapping, FilterSpace);
-
-                            auto BridgeConstraint = isl_equality_alloc(isl_local_space_from_space(NewSpace));
-                            BridgeConstraint = isl_constraint_set_coefficient_si(BridgeConstraint, isl_dim_in, PossibleAlias.Depth, 1);
-                            BridgeConstraint = isl_constraint_set_constant_si(BridgeConstraint, 0xBEEF);
-                            NewMapping = isl_basic_map_add_constraint(NewMapping, BridgeConstraint);
-
-                            isl_basic_map_free(EmbedderMapping);
-                            EmbedderMapping = constructEmbedderMapping(RightHandEntry.Depth, InputSize, PossibleAlias.Depth + 1);
-                            EmbedderMapping = isl_basic_map_reverse(EmbedderMapping);
-                            auto EmbeddedMapping = isl_basic_map_apply_domain(RightHandEntry.Mapping, EmbedderMapping);
-
-                            NewMapping = isl_basic_map_intersect(NewMapping, EmbeddedMapping);
-                            EWPTEntry NewEntry;
-                            NewEntry.AmountOfIterators = RightHandEntry.AmountOfIterators;
-                            NewEntry.SourceLocation = RightHandEntry.SourceLocation;
-                            NewEntry.Depth = InputSize;
-                            NewEntry.Mapping = NewMapping;
+                        for(EWPTEntry& TailMapping : trackedRoots[AssignedValue].Entries) {
+                            auto NewEntry = generateEntryFromHeapAssignment(PossibleAlias.Depth, EntranceConstraints, TailMapping, ConstantIndex);
                             RootMapping.Entries.push_back(NewEntry);
                         }
                     }
