@@ -31,7 +31,7 @@ class IslTransformMapping {
 class EWPTAliasAnalysis;
 
 /**
- * An EWPT mapping entry of the form 
+ * An EWPT mapping entry of the form
  * <N_s[a_1, ..., a_k], c>(x_1, ..., x_d), where s is the source
  * location of a heap object, a_i represent the iteration vector of
  * the heap object, x_i represent variables of subscript expressions,
@@ -48,25 +48,25 @@ public:
      * depth of this entry.
      */
     int Depth;
-    
+
     /**
      * The amount of iteration indices a_1, ..., a_k by which the heap
      * object is identified, k being this value.
      */
     int AmountOfIterators;
-    
+
     /**
      * The source location of the heap object mapped by this entry.
      */
     const llvm::Value *SourceLocation;
-    
+
     /**
      * An additional set of free variables which represent variables
      * in the C++ source code. All llvm::Value's here must be valid
      * within the same basic block as the EWPT mapping is.
      */
     std::vector<const llvm::Value *> FreeVariables;
-    
+
     /**
      * Set of constraints over x_i, a_i and our free variables,
      * mapping x_i to a_i with additional requirements to free variables.
@@ -81,7 +81,7 @@ public:
 
     void debugPrint(EWPTAliasAnalysis& Analysis);
 
-private: 
+private:
     void InternalApplySubscript(EWPTAliasAnalysis& Analysis, llvm::Value *Subscript);
 };
 
@@ -107,16 +107,22 @@ public:
     }
 };
 
+class EWPTAliasAnalysisState {
+public:
+    std::map<llvm::Value *, EWPTRoot> trackedRoots;
+};
+
+class EWPTAliasAnalysisFrame {
+    llvm::BasicBlock *Entry;
+    llvm::BasicBlock *Exit;
+    std::map<llvm::BasicBlock*, EWPTAliasAnalysisState> BlockOutStates;
+    std::vector<llvm::BasicBlock*> BlocksToProcess;
+};
 
 class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 {
     public:
         static char ID;
-
-        /**
-         * The llvm::Value's for which we are tracking EWPT roots.
-         */
-        std::map<llvm::Value *, EWPTRoot> trackedRoots;
 
         ~EWPTAliasAnalysis()
         {
@@ -128,7 +134,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         ScalarEvolution *SE;
         LoopInfo *LI;
         //@}
-        
+
         isl_ctx *IslContext;
 
         EWPTAliasAnalysis() : FunctionPass(ID)
@@ -146,19 +152,22 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
             InitializeAliasAnalysis(this);
 
+            EWPTAliasAnalysisState BeginState;
+            EWPTAliasAnalysisState EndState;
+
             // The actual analysis.
             for(BasicBlock &Block : F) {
-                runOnBlock(Block);
+                EndState = runOnBlock(Block, BeginState);
             }
 
-            debugPrintEWPTs();
+            debugPrintEWPTs(EndState);
 
             return false;
         }
 
-        void debugPrintEWPTs() {
+        void debugPrintEWPTs(EWPTAliasAnalysisState& State) {
             llvm::outs() << "EWPTs:\n";
-            for(auto Pair : trackedRoots) {
+            for(auto Pair : State.trackedRoots) {
                 auto& RootValue = Pair.first;
                 llvm::outs() << *RootValue << " [" << "\n";
                 for(auto& Entry : Pair.second.Entries) {
@@ -319,7 +328,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
          * Handle a heap assignment that involves a GEP, so something of the form
          * p[x] = q, where the address p[x] is calculated through a GEP instruction.
          */
-        void handleGEPHeapAssignment(GetElementPtrInst *TargetGEP, llvm::Value *AssignedValue) {
+        void handleGEPHeapAssignment(GetElementPtrInst *TargetGEP, llvm::Value *AssignedValue, EWPTAliasAnalysisState& State) {
             if(TargetGEP->getNumIndices() != 1) {
                 // We can't deal with any number of indices but one.
                 return; // TODO Error Handling
@@ -335,16 +344,16 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             llvm::outs() << "Handling GEP Assignment" << *BasePointer << "[" << *Index << "] = " << *AssignedValue << "\n";
 
             // Check that we have an EWPT root associated with our base pointer.
-            if(!trackedRoots.count(BasePointer)) {
+            if(!State.trackedRoots.count(BasePointer)) {
                 return; // TODO Error Handling
             }
 
             // Get all EWPT entries of depth 0.
             std::vector<EWPTEntry> ModifiedHeapObjects;
-            if(!trackedRoots.count(BasePointer)) {
+            if(!State.trackedRoots.count(BasePointer)) {
                 return; // TODO: error handling
             }
-            for(EWPTEntry& Entry : trackedRoots[BasePointer].Entries) {
+            for(EWPTEntry& Entry : State.trackedRoots[BasePointer].Entries) {
                 if(Entry.Depth == 0) {
                     llvm::outs() << "Found entry of depth 0 " << *(Entry.SourceLocation) << "\n";
                     ModifiedHeapObjects.push_back(Entry);
@@ -357,7 +366,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             // with the EWPT of q
 
             for(EWPTEntry& ModifiedHeapObject : ModifiedHeapObjects) {
-                for(auto& RootPair : trackedRoots) {
+                for(auto& RootPair : State.trackedRoots) {
                     EWPTRoot& RootMapping = RootPair.second;
 
                     // Make a copy of the entries, as we may modify them.
@@ -375,11 +384,11 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                         // transition subscript x_{d+1} = x, and each EWPT in q
 
                         // Make a copy, as we might be adding to these entries in the loop
-                        if(!trackedRoots.count(AssignedValue)) {
+                        if(!State.trackedRoots.count(AssignedValue)) {
                             // TODO: error message
                             return;
                         }
-                        auto Entries = trackedRoots[AssignedValue].Entries;
+                        auto Entries = State.trackedRoots[AssignedValue].Entries;
                         llvm::outs() << "Starting to look for tails: " << &PossibleAlias << "\n";
                         for(EWPTEntry& TailMapping : Entries) {
                             llvm::outs() << "Found tail: " << debugMappingToString(PossibleAlias.Mapping) << "\n"; llvm::outs().flush();
@@ -392,29 +401,23 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             }
         }
 
-        void handleHeapAssignment(StoreInst *AssigningInstruction) {
+        void handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State) {
             if(auto CurrentGEPInst = dyn_cast<GetElementPtrInst>(AssigningInstruction->getPointerOperand())) {
-                handleGEPHeapAssignment(CurrentGEPInst, AssigningInstruction->getValueOperand()->stripPointerCasts());
+                handleGEPHeapAssignment(CurrentGEPInst, AssigningInstruction->getValueOperand()->stripPointerCasts(), State);
             }
         }
 
-        void runOnBlock(BasicBlock &block)
+        EWPTAliasAnalysisState runOnBlock(BasicBlock &block, EWPTAliasAnalysisState& InState)
         {
+            EWPTAliasAnalysisState RetValState = InState;
             for(Instruction &CurrentInstruction : block.getInstList()) {
-                /*llvm::outs() << "SCEV for " << CurrentInstruction << ":\n       ";
-                if(SE->isSCEVable(CurrentInstruction.getType())) {
-                     llvm::outs() << *(SE->getSCEV(&CurrentInstruction));
-                } else {
-                     llvm::outs() << "NOT A SCEV";
-                }
-                llvm::outs() << "\n";
-                continue;*/
                 if (LoadInst *CurrentLoadInst = dyn_cast<LoadInst>(&CurrentInstruction)) {
                     llvm::outs() << "Handling Load\n";
                     if(auto CurrentGEPInst = dyn_cast<GetElementPtrInst>(CurrentLoadInst->getPointerOperand())) {
                         if(CurrentGEPInst->getNumIndices() != 1) {
                             // We can't deal with any number of indices but one.
-                            return; // TODO Error Handling
+                            llvm::errs() << "Too many indices in GEP\n"; // TODO Error Handling
+                            exit(1);
                         }
                         // Look for the base-pointer we're loading from
                         auto BasePointer = CurrentGEPInst->getPointerOperand()->stripPointerCasts();
@@ -422,18 +425,18 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                         llvm::outs() << "Handling load " << *BasePointer << "[" << *Index << "]\n";
 
                         // Check if we have an EWPT entry for our base pointer
-                        if(trackedRoots.count(BasePointer)) {
-                            auto LoadedFrom = trackedRoots[BasePointer];
+                        if (RetValState.trackedRoots.count(BasePointer)) {
+                            auto LoadedFrom = RetValState.trackedRoots[BasePointer];
 
                             // We're indexing into the loaded EWPT, so apply a subscript
                             EWPTRoot NewRoot = LoadedFrom.ApplySubscript(*this, Index);
-                            trackedRoots[&CurrentInstruction] = NewRoot;
+                            RetValState.trackedRoots[&CurrentInstruction] = NewRoot;
                         }
                     }
                 }
                 // Case: p[x] = q
                 else if (StoreInst *CurrentStoreInst = dyn_cast<StoreInst>(&CurrentInstruction)) {
-                    handleHeapAssignment(CurrentStoreInst);
+                    handleHeapAssignment(CurrentStoreInst, RetValState);
                 }
 
                 // Case: p = malloc();
@@ -449,11 +452,13 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                     auto space = isl_space_alloc(IslContext, 0, 0, 0);
                     Entry.Mapping = isl_basic_map_universe(space);
                     Root.Entries.push_back(Entry);
-                    trackedRoots[&CurrentInstruction] = Root;
+                    RetValState.trackedRoots[&CurrentInstruction] = Root;
 
                     llvm::outs() << "Added new 0 depth entry for " << &CurrentInstruction << "\n";
                 }
             }
+
+            return RetValState;
         }
 
         void getAnalysisUsage(AnalysisUsage &AU) const
@@ -479,7 +484,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 };
 
 void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, llvm::Value *Subscript) {
-    // We need to substitute and project out the first parameter in the input dimension. 
+    // We need to substitute and project out the first parameter in the input dimension.
     if(auto ConstSubscript = dyn_cast<llvm::ConstantInt>(Subscript)) {
         // Generate a constraint of the form x_1 = c, where c is a constant and x_1
         // is the first mapping parameter that we're projecting out.
@@ -491,7 +496,7 @@ void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, llvm::Value 
         NewConstraint = isl_constraint_set_constant_val(NewConstraint, isl_val_int_from_si(Analysis.getIslContext(), ConstValue));
         Mapping = isl_basic_map_add_constraint(Mapping, NewConstraint);
     }
-    
+
     // Project out the first parameter
     Mapping = isl_basic_map_project_out(Mapping, isl_dim_in, 0, 1);
     Depth = Depth - 1;
