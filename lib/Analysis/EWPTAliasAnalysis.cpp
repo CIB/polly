@@ -20,6 +20,8 @@
 #include <isl/val.h>
 #include <isl/options.h>
 
+#include <queue>
+
 using namespace llvm;
 
 class IslTransformMapping {
@@ -105,18 +107,60 @@ public:
         }
         return RetVal;
     }
+
+    EWPTRoot merge(EWPTRoot& Other) {
+        EWPTRoot RetVal = *this;
+        for(auto Entry : Other.Entries) {
+            RetVal.Entries.push_back(Entry);
+        }
+        return RetVal;
+    }
 };
 
 class EWPTAliasAnalysisState {
 public:
     std::map<llvm::Value *, EWPTRoot> trackedRoots;
+
+    EWPTAliasAnalysisState merge(EWPTAliasAnalysisState& Other) {
+        EWPTAliasAnalysisState RetVal = *this;
+        for(auto TrackedRootEntry : Other.trackedRoots) {
+            llvm::Value *Key = TrackedRootEntry.first;
+            EWPTRoot& Value = TrackedRootEntry.second;
+
+            if(RetVal.trackedRoots.count(Key)) {
+                RetVal.trackedRoots[Key] = RetVal.trackedRoots[Key].merge(Value);
+            } else {
+                RetVal.trackedRoots[Key] = Value;
+            }
+        }
+
+        return RetVal;
+    }
 };
 
 class EWPTAliasAnalysisFrame {
+public:
+    EWPTAliasAnalysisFrame *SuperFrame;
+    EWPTAliasAnalysisState *EntryState;
     llvm::BasicBlock *Entry;
     llvm::BasicBlock *Exit;
+    llvm::Loop *RestrictToLoop;
     std::map<llvm::BasicBlock*, EWPTAliasAnalysisState> BlockOutStates;
-    std::vector<llvm::BasicBlock*> BlocksToProcess;
+    std::queue<llvm::BasicBlock*> BlocksToProcess;
+
+    EWPTAliasAnalysisFrame() :
+        SuperFrame(NULL), EntryState(NULL), Entry(NULL), Exit(NULL), RestrictToLoop(NULL)
+    { };
+
+    std::vector<llvm::Value*> GetCurrentLoopIterators() {
+        std::vector<llvm::Value*> RetVal;
+        EWPTAliasAnalysisFrame *Current = this;
+        while(Current != NULL) {
+            RetVal.push_back(Current->RestrictToLoop->getCanonicalInductionVariable());
+            Current = Current->SuperFrame;
+        };
+        return RetVal;
+    }
 };
 
 class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
@@ -148,21 +192,109 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         {
             // Initialization.
             SE = &getAnalysis<ScalarEvolution>();
-            LI = &getAnalysis<LoopInfo>();
+            LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
 
             InitializeAliasAnalysis(this);
 
-            EWPTAliasAnalysisState BeginState;
-            EWPTAliasAnalysisState EndState;
-
             // The actual analysis.
-            for(BasicBlock &Block : F) {
-                EndState = runOnBlock(Block, BeginState);
+            EWPTAliasAnalysisFrame Frame;
+            Frame.Entry = &(F.getEntryBlock());
+            Frame.RestrictToLoop = NULL;
+            Frame.BlocksToProcess.push(Frame.Entry);
+            iterativeControlFlowAnalysis(Frame);
+
+            for(auto Pair : Frame.BlockOutStates) {
+                llvm::outs() << "EWPTs for BB:\n";
+                debugPrintEWPTs(Pair.second);
             }
 
-            debugPrintEWPTs(EndState);
-
             return false;
+        }
+
+        bool arePredecessorsProcessed(EWPTAliasAnalysisFrame& Frame, BasicBlock* ToCheck) {
+            bool AllPredecessorsComputed = true;
+            for(auto PI = pred_begin(ToCheck), E = pred_end(ToCheck); PI != E; PI++) {
+                auto Predecessor = *PI;
+                if(!Frame.BlockOutStates.count(Predecessor)) {
+                    AllPredecessorsComputed = false;
+                    break;
+                }
+            }
+            return AllPredecessorsComputed;
+        }
+        
+        std::vector<EWPTAliasAnalysisState*> getPredecessorStates(EWPTAliasAnalysisFrame& Frame, BasicBlock *Current) {
+            std::vector<EWPTAliasAnalysisState*> PredecessorStates;
+            if(Current == Frame.Entry && Frame.EntryState) {
+                PredecessorStates.push_back(Frame.EntryState);
+                return PredecessorStates;
+            }
+            for(auto PI = pred_begin(Current), E = pred_end(Current); PI != E; PI++) {
+                auto Predecessor = *PI;
+                auto& PredecessorState = Frame.BlockOutStates[Predecessor];
+                PredecessorStates.push_back(&PredecessorState);
+            }
+            return PredecessorStates;
+        }
+
+        void iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Frame) {
+            Frame.BlocksToProcess.push(Frame.Entry);
+            while(Frame.BlocksToProcess.size()) {
+                // TODO: A better way to iterate over the basic blocks in a function
+                //       that automatically detects the next block that can be processed.
+                BasicBlock *Current = Frame.BlocksToProcess.front();
+                Frame.BlocksToProcess.pop();
+
+                if(!arePredecessorsProcessed(Frame, Current)) {
+                    llvm::errs() << "Trying to process block with unprocessed predecessors.";
+                    exit(1);
+                }
+                auto StartWithState = MergeStates(getPredecessorStates(Frame, Current));
+                Frame.BlockOutStates[Current] = runOnBlock(*Current, StartWithState);
+                // Once this frame is done, try processing successors
+                for(auto SI = succ_begin(Current), E = succ_end(Current); SI != E; SI++) {
+                    // Check that this successor now has all requirements.
+                    auto Successor = *SI;
+                    if(arePredecessorsProcessed(Frame, Successor)) {
+                        // Only process the block if it's actually within the current loop.
+                        if(!Frame.RestrictToLoop || Frame.RestrictToLoop->contains(Successor)) {
+                            Frame.BlocksToProcess.push(Successor);
+                        }
+                    }
+                }
+            }
+        }
+
+        void handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBlock& LoopHeader, Loop& LoopToAnalyze) {
+            // Create a new analysis frame for the analysis of the loop body.
+            EWPTAliasAnalysisFrame SubFrame;
+            SubFrame.Entry = &LoopHeader;
+            SubFrame.BlocksToProcess.push(SubFrame.Entry);
+            SubFrame.RestrictToLoop = &LoopToAnalyze;
+            SubFrame.SuperFrame = &SuperFrame;
+            iterativeControlFlowAnalysis(SubFrame);
+        }
+
+        EWPTAliasAnalysisState MergeStates(std::vector<EWPTAliasAnalysisState*> StatesToMerge) {
+            if(StatesToMerge.size() == 0) {
+                return EWPTAliasAnalysisState();
+            }
+            EWPTAliasAnalysisState RetVal = *(StatesToMerge[0]);
+            for(unsigned I = 1; I < StatesToMerge.size(); I++) {
+                RetVal = RetVal.merge(*(StatesToMerge[I]));
+            }
+            return RetVal;
+        }
+
+        EWPTRoot MergeRoots(std::vector<EWPTRoot*> RootsToMerge) {
+            if(RootsToMerge.size() == 0) {
+                return EWPTRoot();
+            }
+            EWPTRoot RetVal = *(RootsToMerge[0]);
+            for(unsigned I = 1; I < RootsToMerge.size(); I++) {
+                RetVal = RetVal.merge(*(RootsToMerge[I]));
+            }
+            return RetVal;
         }
 
         void debugPrintEWPTs(EWPTAliasAnalysisState& State) {
@@ -439,6 +571,22 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                     handleHeapAssignment(CurrentStoreInst, RetValState);
                 }
 
+                // Case: p = phi x, y
+                else if (PHINode *CurrentPhiNode = dyn_cast<PHINode>(&CurrentInstruction)) {
+                    // In the case of a phi node, we simply merge the EWPT tables of all
+                    // incoming nodes. Note that the associated blocks must already have been
+                    // processed by the iterative algorithm.
+
+                    std::vector<EWPTRoot*> RootsToMerge;
+                    for(int I = 0; I < CurrentPhiNode->getNumIncomingValues(); I++) {
+                        llvm::Value *IncomingValue = CurrentPhiNode->getIncomingValue(I);
+                        EWPTRoot& Root = RetValState.trackedRoots[IncomingValue];
+                        RootsToMerge.push_back(&Root);
+                    }
+                    EWPTRoot NewRoot = MergeRoots(RootsToMerge);
+                    RetValState.trackedRoots[&CurrentInstruction] = NewRoot;
+                }
+
                 // Case: p = malloc();
                 else if (llvm::isNoAliasCall(&CurrentInstruction)) {
                     // Create a new EWPT with just the one entry.
@@ -465,7 +613,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         {
             AliasAnalysis::getAnalysisUsage(AU);
             AU.addRequired<AliasAnalysis>();
-            AU.addRequired<LoopInfo>();
+            AU.addRequired<LoopInfoWrapperPass>();
             AU.addRequired<ScalarEvolution>();
             AU.setPreservesAll();
         }
