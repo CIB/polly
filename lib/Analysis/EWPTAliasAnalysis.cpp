@@ -24,12 +24,6 @@
 
 using namespace llvm;
 
-class IslTransformMapping {
-    std::vector<int> dim_in_replacements;
-    std::vector<int> dim_out_replacements;
-    std::vector<int> dim_set_replacements;
-};
-
 class EWPTAliasAnalysis;
 
 /**
@@ -79,18 +73,33 @@ public:
      * Apply the given llvm::Value as subscript expression to the first
      * parameter x_1
      */
-    EWPTEntry ApplySubscript(EWPTAliasAnalysis& Analysis, llvm::Value *Subscript) const;
+    EWPTEntry ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Offset) const;
+
+    /**
+     * Get the index for the given llvm::Value as free variable within this mapping entry.
+     *
+     * May add the variable as new free variable with new index to the mapping entry.
+     */
+    int GetIndexForFreeVariable(const llvm::Value *FreeVariable) {
+        for(unsigned I = 0; I < FreeVariables.size(); I++) {
+            if(FreeVariables[I] == FreeVariable) {
+                return I;
+            }
+        }
+        FreeVariables.push_back(FreeVariable);
+        return FreeVariables.size() - 1;
+    }
 
     void debugPrint(EWPTAliasAnalysis& Analysis);
 
 private:
-    void InternalApplySubscript(EWPTAliasAnalysis& Analysis, llvm::Value *Subscript);
+    void InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Offset);
 };
 
-EWPTEntry EWPTEntry::ApplySubscript(EWPTAliasAnalysis& Analysis, llvm::Value *Subscript) const {
+EWPTEntry EWPTEntry::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV* Offset) const {
     EWPTEntry Copy = *this;
     Copy.Mapping = isl_basic_map_copy(Mapping);
-    Copy.InternalApplySubscript(Analysis, Subscript);
+    Copy.InternalApplySubscript(Analysis, Offset);
     return Copy;
 }
 
@@ -98,11 +107,11 @@ class EWPTRoot {
 public:
     std::vector<EWPTEntry> Entries;
 
-    EWPTRoot ApplySubscript(EWPTAliasAnalysis& Analysis, llvm::Value *Subscript) {
+    EWPTRoot ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Offset) {
         EWPTRoot RetVal;
         for(auto& Entry : Entries) {
             if(Entry.Depth > 0) {
-                RetVal.Entries.push_back(Entry.ApplySubscript(Analysis, Subscript));
+                RetVal.Entries.push_back(Entry.ApplySubscript(Analysis, Offset));
             }
         }
         return RetVal;
@@ -141,7 +150,7 @@ public:
 class EWPTAliasAnalysisFrame {
 public:
     EWPTAliasAnalysisFrame *SuperFrame;
-    EWPTAliasAnalysisState *EntryState;
+    EWPTAliasAnalysisState EntryState;
     llvm::BasicBlock *Entry;
     llvm::BasicBlock *Exit;
     llvm::Loop *RestrictToLoop;
@@ -149,17 +158,22 @@ public:
     std::queue<llvm::BasicBlock*> BlocksToProcess;
 
     EWPTAliasAnalysisFrame() :
-        SuperFrame(NULL), EntryState(NULL), Entry(NULL), Exit(NULL), RestrictToLoop(NULL)
+        SuperFrame(NULL), Entry(NULL), Exit(NULL), RestrictToLoop(NULL)
     { };
 
     std::vector<llvm::Value*> GetCurrentLoopIterators() {
         std::vector<llvm::Value*> RetVal;
         EWPTAliasAnalysisFrame *Current = this;
-        while(Current != NULL) {
+        while(Current->RestrictToLoop != NULL) {
+            // This loop terminates properly because the outermost frame has no loop restrictions.
             RetVal.push_back(Current->RestrictToLoop->getCanonicalInductionVariable());
             Current = Current->SuperFrame;
         };
         return RetVal;
+    }
+
+    unsigned GetDepth() {
+        return GetCurrentLoopIterators().size();
     }
 };
 
@@ -200,7 +214,6 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             EWPTAliasAnalysisFrame Frame;
             Frame.Entry = &(F.getEntryBlock());
             Frame.RestrictToLoop = NULL;
-            Frame.BlocksToProcess.push(Frame.Entry);
             iterativeControlFlowAnalysis(Frame);
 
             for(auto Pair : Frame.BlockOutStates) {
@@ -225,8 +238,8 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         
         std::vector<EWPTAliasAnalysisState*> getPredecessorStates(EWPTAliasAnalysisFrame& Frame, BasicBlock *Current) {
             std::vector<EWPTAliasAnalysisState*> PredecessorStates;
-            if(Current == Frame.Entry && Frame.EntryState) {
-                PredecessorStates.push_back(Frame.EntryState);
+            if(Current == Frame.Entry) {
+                PredecessorStates.push_back(&Frame.EntryState);
                 return PredecessorStates;
             }
             for(auto PI = pred_begin(Current), E = pred_end(Current); PI != E; PI++) {
@@ -245,20 +258,25 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                 BasicBlock *Current = Frame.BlocksToProcess.front();
                 Frame.BlocksToProcess.pop();
 
-                if(!arePredecessorsProcessed(Frame, Current)) {
+                if(!arePredecessorsProcessed(Frame, Current) && !LI->isLoopHeader(Current)) {
                     llvm::errs() << "Trying to process block with unprocessed predecessors.";
                     exit(1);
                 }
                 auto StartWithState = MergeStates(getPredecessorStates(Frame, Current));
-                Frame.BlockOutStates[Current] = runOnBlock(*Current, StartWithState);
+                Frame.BlockOutStates[Current] = runOnBlock(*Current, Frame, StartWithState);
                 // Once this frame is done, try processing successors
                 for(auto SI = succ_begin(Current), E = succ_end(Current); SI != E; SI++) {
                     // Check that this successor now has all requirements.
                     auto Successor = *SI;
-                    if(arePredecessorsProcessed(Frame, Successor)) {
-                        // Only process the block if it's actually within the current loop.
-                        if(!Frame.RestrictToLoop || Frame.RestrictToLoop->contains(Successor)) {
+                    // Only process the successor if it's actually within the current loop and if it's not
+                    // the loop header of the current loop.
+                    if(!Frame.RestrictToLoop || (Frame.RestrictToLoop->contains(Successor) && Successor != Frame.Entry)) {
+                        if(arePredecessorsProcessed(Frame, Successor)) {
                             Frame.BlocksToProcess.push(Successor);
+                        } else if(LI->isLoopHeader(Successor) ) {
+                            // TODO
+                            Loop* LoopToAnalyze = LI->getLoopFor(Successor);
+                            handleLoop(Frame, *Successor, *LoopToAnalyze);
                         }
                     }
                 }
@@ -269,7 +287,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             // Create a new analysis frame for the analysis of the loop body.
             EWPTAliasAnalysisFrame SubFrame;
             SubFrame.Entry = &LoopHeader;
-            SubFrame.BlocksToProcess.push(SubFrame.Entry);
+            SubFrame.EntryState = MergeStates(getPredecessorStates(SuperFrame, &LoopHeader));
             SubFrame.RestrictToLoop = &LoopToAnalyze;
             SubFrame.SuperFrame = &SuperFrame;
             iterativeControlFlowAnalysis(SubFrame);
@@ -539,32 +557,43 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             }
         }
 
-        EWPTAliasAnalysisState runOnBlock(BasicBlock &block, EWPTAliasAnalysisState& InState)
+        void handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
+            llvm::outs() << "Handling Load\n";
+
+            const SCEV *AccessFunction = SE->getSCEVAtScope(CurrentLoadInst->getPointerOperand(), Frame.RestrictToLoop);
+            auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
+
+            if (!BasePointer) {
+                llvm::errs() << "Can not handle base pointer for " << *CurrentLoadInst << "\n";
+                exit(1);
+            }
+
+            auto BaseValue = BasePointer->getValue();
+
+            if (isa<UndefValue>(BaseValue)) {
+                llvm::errs() << "Can not handle base value for " << *CurrentLoadInst << "\n";
+                exit(1);
+            }
+
+            auto Offset = SE->getMinusSCEV(AccessFunction, BasePointer);
+
+            // Check if we have an EWPT entry for our base pointer
+            if (State.trackedRoots.count(BaseValue)) {
+                auto LoadedFrom = State.trackedRoots[BaseValue];
+
+                // We're indexing into the loaded EWPT, so apply a subscript
+                EWPTRoot NewRoot = LoadedFrom.ApplySubscript(*this, Offset);
+                State.trackedRoots[CurrentLoadInst] = NewRoot;
+            }
+        }
+
+        EWPTAliasAnalysisState runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Frame, EWPTAliasAnalysisState& InState)
         {
             EWPTAliasAnalysisState RetValState = InState;
             for(Instruction &CurrentInstruction : block.getInstList()) {
+                // Case: p = q[x]
                 if (LoadInst *CurrentLoadInst = dyn_cast<LoadInst>(&CurrentInstruction)) {
-                    llvm::outs() << "Handling Load\n";
-                    if(auto CurrentGEPInst = dyn_cast<GetElementPtrInst>(CurrentLoadInst->getPointerOperand())) {
-                        if(CurrentGEPInst->getNumIndices() != 1) {
-                            // We can't deal with any number of indices but one.
-                            llvm::errs() << "Too many indices in GEP\n"; // TODO Error Handling
-                            exit(1);
-                        }
-                        // Look for the base-pointer we're loading from
-                        auto BasePointer = CurrentGEPInst->getPointerOperand()->stripPointerCasts();
-                        auto Index = CurrentGEPInst->idx_begin()->get();
-                        llvm::outs() << "Handling load " << *BasePointer << "[" << *Index << "]\n";
-
-                        // Check if we have an EWPT entry for our base pointer
-                        if (RetValState.trackedRoots.count(BasePointer)) {
-                            auto LoadedFrom = RetValState.trackedRoots[BasePointer];
-
-                            // We're indexing into the loaded EWPT, so apply a subscript
-                            EWPTRoot NewRoot = LoadedFrom.ApplySubscript(*this, Index);
-                            RetValState.trackedRoots[&CurrentInstruction] = NewRoot;
-                        }
-                    }
+                    handleLoad(CurrentLoadInst, Frame, RetValState);
                 }
                 // Case: p[x] = q
                 else if (StoreInst *CurrentStoreInst = dyn_cast<StoreInst>(&CurrentInstruction)) {
@@ -578,7 +607,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                     // processed by the iterative algorithm.
 
                     std::vector<EWPTRoot*> RootsToMerge;
-                    for(int I = 0; I < CurrentPhiNode->getNumIncomingValues(); I++) {
+                    for(unsigned I = 0; I < CurrentPhiNode->getNumIncomingValues(); I++) {
                         llvm::Value *IncomingValue = CurrentPhiNode->getIncomingValue(I);
                         EWPTRoot& Root = RetValState.trackedRoots[IncomingValue];
                         RootsToMerge.push_back(&Root);
@@ -593,16 +622,33 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                     EWPTRoot Root;
                     EWPTEntry Entry;
 
-                    // TODO: deal with iterators
-                    Entry.AmountOfIterators = 0;
+                    auto Iterators = Frame.GetCurrentLoopIterators();
+
+                    Entry.AmountOfIterators = Iterators.size();
                     Entry.SourceLocation = &CurrentInstruction;
                     Entry.Depth = 0;
-                    auto space = isl_space_alloc(IslContext, 0, 0, 0);
-                    Entry.Mapping = isl_basic_map_universe(space);
+
+                    auto Space = isl_space_alloc(IslContext, Entry.AmountOfIterators, 0, Entry.AmountOfIterators);
+                    Entry.Mapping = isl_basic_map_universe(isl_space_copy(Space));
+                    auto LocalSpace = isl_local_space_from_space(Space);
+
+                    for(unsigned I = 0; I < Iterators.size(); I++) {
+                        auto Index = Entry.GetIndexForFreeVariable(Iterators[I]);
+
+                        // For each iterator i we need a constraint that
+                        // a_i = i
+                        auto Constraint = isl_equality_alloc(isl_local_space_copy(LocalSpace));
+
+                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, Index, -1);
+                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_out, I, 1);
+                        Entry.Mapping = isl_basic_map_add_constraint(Entry.Mapping, Constraint);
+                    }
+
                     Root.Entries.push_back(Entry);
                     RetValState.trackedRoots[&CurrentInstruction] = Root;
 
-                    llvm::outs() << "Added new 0 depth entry for " << &CurrentInstruction << "\n";
+                    llvm::outs() << "Added new 0 depth entry for " << CurrentInstruction << "\n";
+                    llvm::outs() << "New constraints: " << debugMappingToString(Entry.Mapping) << "\n";
                 }
             }
 
@@ -631,18 +677,22 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         }
 };
 
-void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, llvm::Value *Subscript) {
+void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Offset) {
     // We need to substitute and project out the first parameter in the input dimension.
-    if(auto ConstSubscript = dyn_cast<llvm::ConstantInt>(Subscript)) {
-        // Generate a constraint of the form x_1 = c, where c is a constant and x_1
-        // is the first mapping parameter that we're projecting out.
-        int64_t ConstValue = ConstSubscript->getSExtValue();
-        llvm::outs() << "Adding constraint x_1=" << ConstValue << " to " << Analysis.debugMappingToString(Mapping) << "\n";
-        isl_local_space *LocalSpace = isl_local_space_from_space(isl_basic_map_get_space(Mapping));
-        isl_constraint *NewConstraint = isl_equality_alloc(LocalSpace);
-        NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_in, 0, -1);
-        NewConstraint = isl_constraint_set_constant_val(NewConstraint, isl_val_int_from_si(Analysis.getIslContext(), ConstValue));
-        Mapping = isl_basic_map_add_constraint(Mapping, NewConstraint);
+    auto OffsetUnknown = dyn_cast<SCEVUnknown>(Offset);
+    if(OffsetUnknown) {
+        auto OffsetValue = OffsetUnknown->getValue();
+        if(auto ConstSubscript = dyn_cast<llvm::ConstantInt>(OffsetValue)) {
+            // Generate a constraint of the form x_1 = c, where c is a constant and x_1
+            // is the first mapping parameter that we're projecting out.
+            int64_t ConstValue = ConstSubscript->getSExtValue();
+            llvm::outs() << "Adding constraint x_1=" << ConstValue << " to " << Analysis.debugMappingToString(Mapping) << "\n";
+            isl_local_space *LocalSpace = isl_local_space_from_space(isl_basic_map_get_space(Mapping));
+            isl_constraint *NewConstraint = isl_equality_alloc(LocalSpace);
+            NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_in, 0, -1);
+            NewConstraint = isl_constraint_set_constant_val(NewConstraint, isl_val_int_from_si(Analysis.getIslContext(), ConstValue));
+            Mapping = isl_basic_map_add_constraint(Mapping, NewConstraint);
+        }
     }
 
     // Project out the first parameter
