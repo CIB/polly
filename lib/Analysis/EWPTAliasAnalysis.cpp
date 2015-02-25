@@ -316,35 +316,85 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             // must point toward the loop header, but these are already requirements for "natural loops"
             // as recognized by LoopInfo.
 
-            // Create a new analysis frame for the analysis of the loop body.
-            EWPTAliasAnalysisFrame SubFrame;
-            SubFrame.EntryState = MergeStates(getPredecessorStates(SuperFrame, &LoopHeader));
-            SubFrame.RestrictToLoop = &LoopToAnalyze;
-            SubFrame.SuperFrame = &SuperFrame;
-            SubFrame.BlockOutStates = SuperFrame.BlockOutStates;
-            SubFrame.Exit = &LoopHeader;
+            EWPTAliasAnalysisState ExitState;
+            auto InductionVariable = LoopToAnalyze.getCanonicalInductionVariable();
+            auto IVName = InductionVariable->getName().str();
 
-            // TODO: merge with the same check in iterativeControlFlowAnalysis()
-            for(auto SI = succ_begin(&LoopHeader), E = succ_end(&LoopHeader); SI != E; SI++) {
-                auto Successor = *SI;
-                // Only process the successor if it's actually within the current loop.
-                if(SubFrame.RestrictToLoop->contains(Successor)) {
-                    if(arePredecessorsProcessed(SubFrame, Successor) || LI->isLoopHeader(Successor)) {
-                        SubFrame.BlocksToProcess.push(Successor);
+            for(unsigned I = 0; I < 3; I++) {
+                // Create a new analysis frame for the analysis of the loop body.
+                EWPTAliasAnalysisFrame SubFrame;
+                SubFrame.EntryState = MergeStates(getPredecessorStates(SuperFrame, &LoopHeader));
+                SubFrame.RestrictToLoop = &LoopToAnalyze;
+                SubFrame.SuperFrame = &SuperFrame;
+                SubFrame.BlockOutStates = SuperFrame.BlockOutStates;
+                SubFrame.Exit = &LoopHeader;
+
+                // TODO: merge with the same check in iterativeControlFlowAnalysis()
+                for(auto SI = succ_begin(&LoopHeader), E = succ_end(&LoopHeader); SI != E; SI++) {
+                    auto Successor = *SI;
+                    // Only process the successor if it's actually within the current loop.
+                    if(SubFrame.RestrictToLoop->contains(Successor)) {
+                        if(arePredecessorsProcessed(SubFrame, Successor) || LI->isLoopHeader(Successor)) {
+                            SubFrame.BlocksToProcess.push(Successor);
+                        }
                     }
                 }
+
+                // Start the sub-analysis with the loop header as "exit node"
+                llvm::outs() << "Entering loop " << LoopToAnalyze << "\n";
+                iterativeControlFlowAnalysis(SubFrame);
+                llvm::outs() << "Exiting loop " << LoopToAnalyze << "\n";
+
+                // Extract the out state of the loop header (later: all loop exits)
+                ExitState = SubFrame.BlockOutStates[SubFrame.Exit];
+                bool FixedPointReached = true;
+
+                // Replace "i" by "i-" for the state of the loop header
+                // Add a new "i"
+                // Project out "i-"
+                for(auto RootPair : ExitState.trackedRoots) {
+                    auto& PointsToMapping = RootPair.second;
+                    for(auto& Entry : PointsToMapping.Entries) {
+                        llvm::outs() << "Mapping before aging: "; Entry.debugPrint(*this); llvm::outs() << "\n";
+
+                        // Rename i to i- by adding a new param i- with ( i- = i) and projecting out i
+                        auto Model = isl_space_params_alloc(IslContext, 2);
+                        auto NewIVName = IVName + '-';
+                        auto Identifier = isl_id_alloc(IslContext, IVName.c_str(), InductionVariable);
+                        Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
+                        Identifier = isl_id_alloc(IslContext, NewIVName.c_str(), InductionVariable);
+                        Model = isl_space_set_dim_id(Model, isl_dim_param, 1, Identifier);
+                        Entry.Mapping = isl_basic_map_align_params(Entry.Mapping, Model);
+
+                        auto Constraint = isl_equality_alloc(isl_basic_map_get_local_space(Entry.Mapping));
+                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, -1);
+                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, 1);
+                        Entry.Mapping = isl_basic_map_add_constraint(Entry.Mapping, Constraint);
+                        llvm::outs() << "Mapping before projecting out: "; Entry.debugPrint(*this); llvm::outs() << "\n";
+                        Entry.Mapping = isl_basic_map_project_out(Entry.Mapping, isl_dim_param, 0, 1);
+                        llvm::outs() << "Mapping after renaming: "; Entry.debugPrint(*this); llvm::outs() << "\n";
+
+
+                        // Add a new parameter i and add the constraint that i- < i
+                        Model = isl_space_params_alloc(IslContext, 2);
+                        Identifier = isl_id_alloc(IslContext, IVName.c_str(), InductionVariable);
+                        Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
+                        Identifier = isl_id_alloc(IslContext, NewIVName.c_str(), InductionVariable);
+                        Model = isl_space_set_dim_id(Model, isl_dim_param, 1, Identifier);
+                        Entry.Mapping = isl_basic_map_align_params(Entry.Mapping, Model);
+
+                        Constraint = isl_inequality_alloc(isl_basic_map_get_local_space(Entry.Mapping));
+                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, 1);
+                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, -1);
+                        Entry.Mapping = isl_basic_map_add_constraint(Entry.Mapping, Constraint);
+                        Entry.Mapping = isl_basic_map_project_out(Entry.Mapping, isl_dim_param, 1, 1);
+
+                        llvm::outs() << "Mapping after aging: "; Entry.debugPrint(*this); llvm::outs() << "\n";
+                    }
+                }
+
+                // Do another iteration to see if we're at a fixed point yet
             }
-
-            // Start the sub-analysis with the loop header as "exit node"
-            llvm::outs() << "Entering loop " << LoopToAnalyze << "\n";
-            iterativeControlFlowAnalysis(SubFrame);
-            llvm::outs() << "Exiting loop " << LoopToAnalyze << "\n";
-
-            // Extract the out state of the loop header (later: all loop exits)
-            // Replace "i" by "i-" for the state of the loop header
-            // Add a new "i"
-            // Project out "i-"
-            // Do another iteration to see if we're at a fixed point yet
         }
 
         EWPTAliasAnalysisState MergeStates(std::vector<EWPTAliasAnalysisState*> StatesToMerge) {
