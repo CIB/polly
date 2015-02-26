@@ -94,6 +94,12 @@ public:
 
     void debugPrint(EWPTAliasAnalysis& Analysis);
 
+    EWPTEntry clone() {
+        EWPTEntry RetVal = *this;
+        RetVal.Mapping = isl_basic_map_copy(Mapping);
+        return RetVal;
+    }
+
 private:
     void InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State);
 };
@@ -126,6 +132,32 @@ public:
         }
         return RetVal;
     }
+
+    EWPTRoot clone() {
+        EWPTRoot RetVal;
+        for(auto& Entry : Entries) {
+            RetVal.Entries.push_back(Entry.clone());
+        }
+        return RetVal;
+    }
+
+    bool equals(EWPTRoot& Other) {
+        for(auto& Entry : Entries) {
+            bool IsMatched = false;
+            for(auto& OtherEntry : Other.Entries) {
+                if(Entry.Depth == OtherEntry.Depth && Entry.SourceLocation == OtherEntry.SourceLocation) {
+                    if(isl_basic_map_is_equal(Entry.Mapping, OtherEntry.Mapping)) {
+                        IsMatched = true;
+                        break;
+                    }
+                }
+            }
+            if(!IsMatched) {
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 class EWPTAliasAnalysisState {
@@ -146,6 +178,26 @@ public:
         }
 
         return RetVal;
+    }
+
+    EWPTAliasAnalysisState clone() {
+        EWPTAliasAnalysisState RetVal;
+        for(auto Pair : trackedRoots) {
+            RetVal.trackedRoots[Pair.first] = Pair.second.clone();
+        }
+        return RetVal;
+    }
+
+    bool equals(EWPTAliasAnalysisState& Other) {
+        for(auto Pair : trackedRoots) {
+            auto Entry = Pair.second;
+            auto OtherEntry = Other.trackedRoots[Pair.first];
+
+            if(!Entry.equals(OtherEntry)) {
+                return false;
+            }
+        }
+        return true;
     }
 };
 
@@ -267,12 +319,19 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                 if(LI->isLoopHeader(Current)) {
                     Loop* LoopToAnalyze = LI->getLoopFor(Current);
-                    handleLoop(Frame, *Current, *LoopToAnalyze);
-                    continue;
+                    Frame.BlockOutStates[Current] = handleLoop(Frame, *Current, *LoopToAnalyze);
 
-                    // TODO: don't continue, instead get all exit nodes of the loop
-                    //       and compute the successors as sum of the successors of
-                    //       those exit nodes
+                    // Only add the successors that are not part of the loop.
+                    for(auto SI = succ_begin(Current), E = succ_end(Current); SI != E; SI++) {
+                        // Check that this successor now has all requirements.
+                        auto Successor = *SI;
+                        // Only process the successor if it's actually within the current loop.
+                        if(!LoopToAnalyze->contains(Successor)) {
+                            Frame.BlocksToProcess.push(Successor);
+                        }
+                    }
+
+                    continue;
                 } else if(!arePredecessorsProcessed(Frame, Current)) {
                     llvm::errs() << "Trying to process block with unprocessed predecessors.";
                     exit(1);
@@ -297,7 +356,25 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             }
         }
 
-        void handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBlock& LoopHeader, Loop& LoopToAnalyze) {
+        llvm::Value *getUpperBoundForLoop(Loop& LoopToAnalyze) {
+            BasicBlock* LoopHeader = LoopToAnalyze.getHeader();
+            for(auto& Instruction : LoopHeader->getInstList()) {
+                llvm::outs() << "Checking " << Instruction << "\n";
+                if(auto Comparison = dyn_cast<ICmpInst>(&Instruction)) {
+                    if(
+                        Comparison->getOperand(0) == LoopToAnalyze.getCanonicalInductionVariable() &&
+                        Comparison->isFalseWhenEqual()
+                    ) {
+                        return Comparison->getOperand(1);
+                    }
+                }
+            }
+
+            llvm::errs() << "No upper bound found for loop.\n";
+            exit(1);
+        }
+
+        EWPTAliasAnalysisState handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBlock& LoopHeader, Loop& LoopToAnalyze) {
             // We can only handle loops of a specific type, check these properties first.
 
             // It must have a canonical induction variable, i.e. for(i = 0; i < n; i++)
@@ -320,10 +397,13 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             auto InductionVariable = LoopToAnalyze.getCanonicalInductionVariable();
             auto IVName = InductionVariable->getName().str();
 
+            auto EntryState = MergeStates(getPredecessorStates(SuperFrame, &LoopHeader));
+
+            bool FixedPointReached = false;
             for(unsigned I = 0; I < 3; I++) {
                 // Create a new analysis frame for the analysis of the loop body.
                 EWPTAliasAnalysisFrame SubFrame;
-                SubFrame.EntryState = MergeStates(getPredecessorStates(SuperFrame, &LoopHeader));
+                SubFrame.EntryState = EntryState;
                 SubFrame.RestrictToLoop = &LoopToAnalyze;
                 SubFrame.SuperFrame = &SuperFrame;
                 SubFrame.BlockOutStates = SuperFrame.BlockOutStates;
@@ -347,7 +427,6 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                 // Extract the out state of the loop header (later: all loop exits)
                 ExitState = SubFrame.BlockOutStates[SubFrame.Exit];
-                bool FixedPointReached = true;
 
                 // Replace "i" by "i-" for the state of the loop header
                 // Add a new "i"
@@ -386,15 +465,62 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                         Constraint = isl_inequality_alloc(isl_basic_map_get_local_space(Entry.Mapping));
                         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, 1);
                         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, -1);
+                        Constraint = isl_constraint_set_constant_si(Constraint, -1);
                         Entry.Mapping = isl_basic_map_add_constraint(Entry.Mapping, Constraint);
                         Entry.Mapping = isl_basic_map_project_out(Entry.Mapping, isl_dim_param, 1, 1);
 
                         llvm::outs() << "Mapping after aging: "; Entry.debugPrint(*this); llvm::outs() << "\n";
                     }
+                    llvm::outs() << "State after aging.\n";
+                    ExitState.trackedRoots[RootPair.first] = PointsToMapping;
+                    debugPrintEWPTs(ExitState);
+                }
+
+                if(ExitState.equals(EntryState)) {
+                    llvm::outs() << "We have reached a fixed point.\n";
+                    debugPrintEWPTs(ExitState);
+                    EntryState = ExitState;
+                    FixedPointReached = true;
+                    break;
                 }
 
                 // Do another iteration to see if we're at a fixed point yet
+                EntryState = ExitState;
             }
+
+            if(FixedPointReached) {
+                // Do binding.
+                llvm::Value *UpperBound = getUpperBoundForLoop(LoopToAnalyze);
+                auto UpperBoundName = UpperBound->getName().str();
+
+                // i must be <= UpperBound
+
+                for(auto RootPair : ExitState.trackedRoots) {
+                    auto& PointsToMapping = RootPair.second;
+                    for(auto& Entry : PointsToMapping.Entries) {
+                        auto Model = isl_space_params_alloc(IslContext, 2);
+                        auto Identifier = isl_id_alloc(IslContext, IVName.c_str(), InductionVariable);
+                        Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
+                        Identifier = isl_id_alloc(IslContext, UpperBoundName.c_str(), UpperBound);
+                        Model = isl_space_set_dim_id(Model, isl_dim_param, 1, Identifier);
+                        Entry.Mapping = isl_basic_map_align_params(Entry.Mapping, Model);
+
+                        auto Constraint = isl_inequality_alloc(isl_basic_map_get_local_space(Entry.Mapping));
+                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, 1);
+                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, -1);
+                        Entry.Mapping = isl_basic_map_add_constraint(Entry.Mapping, Constraint);
+                        llvm::outs() << "Binding before projecting out: "; Entry.debugPrint(*this); llvm::outs() << "\n";
+                        Entry.Mapping = isl_basic_map_project_out(Entry.Mapping, isl_dim_param, 0, 1);
+                        llvm::outs() << "Binding after projecting out: "; Entry.debugPrint(*this); llvm::outs() << "\n";
+
+                    }
+                }
+
+                return EntryState;
+            }
+
+            llvm::outs() << "Did not converge.\n";
+            exit(1);
         }
 
         EWPTAliasAnalysisState MergeStates(std::vector<EWPTAliasAnalysisState*> StatesToMerge) {
@@ -729,7 +855,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
         EWPTAliasAnalysisState runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Frame, EWPTAliasAnalysisState& InState)
         {
-            EWPTAliasAnalysisState RetValState = InState;
+            EWPTAliasAnalysisState RetValState = InState.clone();
             for(Instruction &CurrentInstruction : block.getInstList()) {
                 llvm::outs() << "Handling instruction " << CurrentInstruction << "\n";
 
