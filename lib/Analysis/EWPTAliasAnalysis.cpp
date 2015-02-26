@@ -165,7 +165,7 @@ public:
     std::map<llvm::Value *, EWPTRoot> trackedRoots;
 
     EWPTAliasAnalysisState merge(EWPTAliasAnalysisState& Other) {
-        EWPTAliasAnalysisState RetVal = *this;
+        EWPTAliasAnalysisState RetVal = this->clone();
         for(auto TrackedRootEntry : Other.trackedRoots) {
             llvm::Value *Key = TrackedRootEntry.first;
             EWPTRoot& Value = TrackedRootEntry.second;
@@ -495,7 +495,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                 // i must be <= UpperBound
 
-                for(auto RootPair : ExitState.trackedRoots) {
+                for(auto RootPair : EntryState.trackedRoots) {
                     auto& PointsToMapping = RootPair.second;
                     for(auto& Entry : PointsToMapping.Entries) {
                         auto Model = isl_space_params_alloc(IslContext, 2);
@@ -506,14 +506,14 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                         Entry.Mapping = isl_basic_map_align_params(Entry.Mapping, Model);
 
                         auto Constraint = isl_inequality_alloc(isl_basic_map_get_local_space(Entry.Mapping));
-                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, 1);
-                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, -1);
+                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, -1);
+                        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, 1);
                         Entry.Mapping = isl_basic_map_add_constraint(Entry.Mapping, Constraint);
                         llvm::outs() << "Binding before projecting out: "; Entry.debugPrint(*this); llvm::outs() << "\n";
                         Entry.Mapping = isl_basic_map_project_out(Entry.Mapping, isl_dim_param, 0, 1);
                         llvm::outs() << "Binding after projecting out: "; Entry.debugPrint(*this); llvm::outs() << "\n";
-
                     }
+                    EntryState.trackedRoots[RootPair.first] = PointsToMapping;
                 }
 
                 return EntryState;
