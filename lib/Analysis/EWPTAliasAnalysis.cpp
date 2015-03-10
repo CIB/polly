@@ -45,18 +45,18 @@ public:
      * The amount of parameters x_1, x_2, ..., x_d, where d is the
      * depth of this entry.
      */
-    int Depth;
+    unsigned Depth;
 
     /**
      * The amount of iteration indices a_1, ..., a_k by which the heap
      * object is identified, k being this value.
      */
-    int AmountOfIterators;
+    unsigned AmountOfIterators;
 
     /**
      * The source location of the heap object mapped by this entry.
      */
-    const llvm::Value *SourceLocation;
+    llvm::Value *SourceLocation;
 
     /**
      * An additional set of free variables which represent variables
@@ -69,7 +69,7 @@ public:
      * Set of constraints over x_i, a_i and our free variables,
      * mapping x_i to a_i with additional requirements to free variables.
      */
-    isl_basic_map *Mapping;
+    isl_map *Mapping;
 
     /**
      * Apply the given llvm::Value as subscript expression to the first
@@ -96,7 +96,17 @@ public:
 
     EWPTEntry clone() {
         EWPTEntry RetVal = *this;
-        RetVal.Mapping = isl_basic_map_copy(Mapping);
+        RetVal.Mapping = isl_map_copy(Mapping);
+        return RetVal;
+    }
+
+    EWPTEntry merge(EWPTEntry& Other) {
+        assert(Depth == Other.Depth && AmountOfIterators == Other.AmountOfIterators);
+
+        EWPTEntry RetVal = *this;
+        auto Mapping1 = isl_map_copy(Mapping);
+        auto Mapping2 = isl_map_copy(Other.Mapping);
+        RetVal.Mapping = isl_map_union(Mapping1, Mapping2);
         return RetVal;
     }
 
@@ -106,53 +116,70 @@ private:
 
 EWPTEntry EWPTEntry::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV* Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) const {
     EWPTEntry Copy = *this;
-    Copy.Mapping = isl_basic_map_copy(Mapping);
+    Copy.Mapping = isl_map_copy(Mapping);
     Copy.InternalApplySubscript(Analysis, Subscript, Frame, State);
     return Copy;
 }
 
 class EWPTRoot {
 public:
-    std::vector<EWPTEntry> Entries;
+    std::map< std::pair<unsigned, llvm::Value*>, EWPTEntry> Entries;
 
     EWPTRoot ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
         EWPTRoot RetVal;
-        for(auto& Entry : Entries) {
+        for(auto EntryPair : Entries) {
+            auto& Entry = EntryPair.second;
             if(Entry.Depth > 0) {
-                RetVal.Entries.push_back(Entry.ApplySubscript(Analysis, Subscript, Frame, State));
+                RetVal.Entries[EntryPair.first] = Entry.ApplySubscript(Analysis, Subscript, Frame, State);
             }
         }
         return RetVal;
     }
 
+    std::vector< std::pair<unsigned, llvm::Value*> > getCombinedKeys(EWPTRoot& Other) {
+        std::vector< std::pair<unsigned, llvm::Value*> > AllKeys;
+        for(auto EntryPair : Entries) {
+            AllKeys.push_back(EntryPair.first);
+        }
+        for(auto EntryPair : Other.Entries) {
+            AllKeys.push_back(EntryPair.first);
+        }
+        return AllKeys;
+    }
+
     EWPTRoot merge(EWPTRoot& Other) {
-        EWPTRoot RetVal = *this;
-        for(auto Entry : Other.Entries) {
-            RetVal.Entries.push_back(Entry);
+        EWPTRoot RetVal;
+
+        auto AllKeys = getCombinedKeys(Other);
+        for(auto EntryKey : AllKeys) {
+            EWPTEntry MergedEntry;
+            if(!Entries.count(EntryKey)) {
+                MergedEntry = Other.Entries[EntryKey];
+            } else if(!Other.Entries.count(EntryKey)) {
+                MergedEntry = Entries[EntryKey];
+            } else {
+                MergedEntry = Entries[EntryKey].merge(Other.Entries[EntryKey]);
+            }
+            RetVal.Entries[EntryKey] = MergedEntry;
         }
         return RetVal;
     }
 
     EWPTRoot clone() {
         EWPTRoot RetVal;
-        for(auto& Entry : Entries) {
-            RetVal.Entries.push_back(Entry.clone());
+        for(auto& EntryPair : Entries) {
+            RetVal.Entries[EntryPair.first] = EntryPair.second.clone();
         }
         return RetVal;
     }
 
     bool equals(EWPTRoot& Other) {
-        for(auto& Entry : Entries) {
-            bool IsMatched = false;
-            for(auto& OtherEntry : Other.Entries) {
-                if(Entry.Depth == OtherEntry.Depth && Entry.SourceLocation == OtherEntry.SourceLocation) {
-                    if(isl_basic_map_is_equal(Entry.Mapping, OtherEntry.Mapping)) {
-                        IsMatched = true;
-                        break;
-                    }
-                }
+        auto AllKeys = getCombinedKeys(Other);
+        for(auto& EntryKey : AllKeys) {
+            if(!Entries.count(EntryKey) || !Other.Entries.count(EntryKey)) {
+                return false;
             }
-            if(!IsMatched) {
+            if(!isl_map_is_equal(Entries[EntryKey].Mapping, Other.Entries[EntryKey].Mapping)) {
                 return false;
             }
         }
@@ -249,6 +276,8 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
         isl_ctx *IslContext;
 
+        EWPTAliasAnalysisState FinalState;
+
         EWPTAliasAnalysis() : FunctionPass(ID)
         {
             initializeEWPTAliasAnalysisPass(*PassRegistry::getPassRegistry());
@@ -301,7 +330,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             return PredecessorStates;
         }
 
-        void iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Frame) {
+        bool iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Frame) {
             for(auto BeginBlock : Frame.BeginBlocks) {
                 Frame.BlocksToProcess.push(BeginBlock);
             }
@@ -310,7 +339,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                 Frame.BlocksToProcess.pop();
 
                 auto StartWithState = MergeStates(getPredecessorStates(Frame, Current));
-                Frame.BlockOutStates[Current] = runOnBlock(*Current, Frame, StartWithState);
+                runOnBlock(*Current, Frame, StartWithState, Frame.BlockOutStates[Current]);
 
                 // Don't process the successors of an exit.
                 if(Current == Frame.Exit) {
@@ -319,7 +348,11 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                 if(LI->isLoopHeader(Current)) {
                     Loop* LoopToAnalyze = LI->getLoopFor(Current);
-                    Frame.BlockOutStates[Current] = handleLoop(Frame, *Current, *LoopToAnalyze);
+                    bool Success = handleLoop(Frame, *Current, *LoopToAnalyze, Frame.BlockOutStates[Current]);
+                    if(!Success) {
+                        llvm::outs() << "Failed to handle loop\n";
+                        return false;
+                    }
 
                     // Only add the successors that are not part of the loop.
                     for(auto SI = succ_begin(Current), E = succ_end(Current); SI != E; SI++) {
@@ -333,7 +366,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                     continue;
                 } else if(!arePredecessorsProcessed(Frame, Current)) {
-                    llvm::errs() << "Trying to process block with unprocessed predecessors.";
+                    llvm::outs() << "Trying to process block with unprocessed predecessors.";
                     exit(1);
                 }
 
@@ -354,6 +387,8 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                 llvm::outs() << "EWPTs for BB:\n";
                 debugPrintEWPTs(Pair.second);
             }
+
+            return true;
         }
 
         llvm::Value *getUpperBoundForLoop(Loop& LoopToAnalyze) {
@@ -370,22 +405,22 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                 }
             }
 
-            llvm::errs() << "No upper bound found for loop.\n";
+            llvm::outs() << "No upper bound found for loop.\n";
             exit(1);
         }
 
-        EWPTAliasAnalysisState handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBlock& LoopHeader, Loop& LoopToAnalyze) {
+        bool handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBlock& LoopHeader, Loop& LoopToAnalyze, EWPTAliasAnalysisState& RetVal) {
             // We can only handle loops of a specific type, check these properties first.
 
             // It must have a canonical induction variable, i.e. for(i = 0; i < n; i++)
             if(!LoopToAnalyze.getCanonicalInductionVariable()) {
-                llvm::errs() << "No canonical induction variable found for loop " << LoopToAnalyze << ", consider prepending the -indvars pass.\n";
+                llvm::outs() << "No canonical induction variable found for loop " << LoopToAnalyze << ", consider prepending the -indvars pass.\n";
                 exit(1);
             }
 
             // It must have exactly one back edge to the loop header.
             if(LoopToAnalyze.getNumBackEdges() != 1) {
-                llvm::errs() << "Too many back edges for loop " << LoopToAnalyze << "\n";
+                llvm::outs() << "Too many back edges for loop " << LoopToAnalyze << "\n";
                 exit(1);
             }
 
@@ -422,7 +457,11 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                 // Start the sub-analysis with the loop header as "exit node"
                 llvm::outs() << "Entering loop " << LoopToAnalyze << "\n";
-                iterativeControlFlowAnalysis(SubFrame);
+                bool Success = iterativeControlFlowAnalysis(SubFrame);
+                if(!Success) {
+                    llvm::outs() << "Control flow analysis in sub-frame failed\n";
+                    return false;
+                }
                 llvm::outs() << "Exiting loop " << LoopToAnalyze << "\n";
 
                 // Extract the out state of the loop header (later: all loop exits)
@@ -433,7 +472,8 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                 // Project out "i-"
                 for(auto RootPair : ExitState.trackedRoots) {
                     auto& PointsToMapping = RootPair.second;
-                    for(auto& Entry : PointsToMapping.Entries) {
+                    for(auto EntryPair : PointsToMapping.Entries) {
+                        auto& Entry = EntryPair.second;
                         llvm::outs() << "Mapping before aging: "; Entry.debugPrint(*this); llvm::outs() << "\n";
 
                         // Rename i to i- by adding a new param i- with ( i- = i) and projecting out i
@@ -443,14 +483,14 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                         Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
                         Identifier = isl_id_alloc(IslContext, NewIVName.c_str(), InductionVariable);
                         Model = isl_space_set_dim_id(Model, isl_dim_param, 1, Identifier);
-                        Entry.Mapping = isl_basic_map_align_params(Entry.Mapping, Model);
+                        Entry.Mapping = isl_map_align_params(Entry.Mapping, Model);
 
-                        auto Constraint = isl_equality_alloc(isl_basic_map_get_local_space(Entry.Mapping));
+                        auto Constraint = isl_equality_alloc(isl_local_space_from_space(isl_map_get_space(Entry.Mapping)));
                         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, -1);
                         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, 1);
-                        Entry.Mapping = isl_basic_map_add_constraint(Entry.Mapping, Constraint);
+                        Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
                         llvm::outs() << "Mapping before projecting out: "; Entry.debugPrint(*this); llvm::outs() << "\n";
-                        Entry.Mapping = isl_basic_map_project_out(Entry.Mapping, isl_dim_param, 0, 1);
+                        Entry.Mapping = isl_map_project_out(Entry.Mapping, isl_dim_param, 0, 1);
                         llvm::outs() << "Mapping after renaming: "; Entry.debugPrint(*this); llvm::outs() << "\n";
 
 
@@ -460,19 +500,20 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                         Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
                         Identifier = isl_id_alloc(IslContext, NewIVName.c_str(), InductionVariable);
                         Model = isl_space_set_dim_id(Model, isl_dim_param, 1, Identifier);
-                        Entry.Mapping = isl_basic_map_align_params(Entry.Mapping, Model);
+                        Entry.Mapping = isl_map_align_params(Entry.Mapping, Model);
 
-                        Constraint = isl_inequality_alloc(isl_basic_map_get_local_space(Entry.Mapping));
+                        Constraint = isl_inequality_alloc(isl_local_space_from_space(isl_map_get_space(Entry.Mapping)));
                         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, 1);
                         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, -1);
                         Constraint = isl_constraint_set_constant_si(Constraint, -1);
-                        Entry.Mapping = isl_basic_map_add_constraint(Entry.Mapping, Constraint);
-                        Entry.Mapping = isl_basic_map_project_out(Entry.Mapping, isl_dim_param, 1, 1);
+                        Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
+                        Entry.Mapping = isl_map_project_out(Entry.Mapping, isl_dim_param, 1, 1);
+
+                        ExitState.trackedRoots[RootPair.first].Entries[EntryPair.first] = Entry;
 
                         llvm::outs() << "Mapping after aging: "; Entry.debugPrint(*this); llvm::outs() << "\n";
                     }
                     llvm::outs() << "State after aging.\n";
-                    ExitState.trackedRoots[RootPair.first] = PointsToMapping;
                     debugPrintEWPTs(ExitState);
                 }
 
@@ -497,26 +538,29 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                 for(auto RootPair : EntryState.trackedRoots) {
                     auto& PointsToMapping = RootPair.second;
-                    for(auto& Entry : PointsToMapping.Entries) {
+                    for(auto EntryPair : PointsToMapping.Entries) {
+                        auto& Entry = EntryPair.second;
                         auto Model = isl_space_params_alloc(IslContext, 2);
                         auto Identifier = isl_id_alloc(IslContext, IVName.c_str(), InductionVariable);
                         Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
                         Identifier = isl_id_alloc(IslContext, UpperBoundName.c_str(), UpperBound);
                         Model = isl_space_set_dim_id(Model, isl_dim_param, 1, Identifier);
-                        Entry.Mapping = isl_basic_map_align_params(Entry.Mapping, Model);
+                        Entry.Mapping = isl_map_align_params(Entry.Mapping, Model);
 
-                        auto Constraint = isl_inequality_alloc(isl_basic_map_get_local_space(Entry.Mapping));
+                        auto Constraint = isl_inequality_alloc(isl_local_space_from_space(isl_map_get_space(Entry.Mapping)));
                         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, -1);
                         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, 1);
-                        Entry.Mapping = isl_basic_map_add_constraint(Entry.Mapping, Constraint);
+                        Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
                         llvm::outs() << "Binding before projecting out: "; Entry.debugPrint(*this); llvm::outs() << "\n";
-                        Entry.Mapping = isl_basic_map_project_out(Entry.Mapping, isl_dim_param, 0, 1);
+                        Entry.Mapping = isl_map_project_out(Entry.Mapping, isl_dim_param, 0, 1);
                         llvm::outs() << "Binding after projecting out: "; Entry.debugPrint(*this); llvm::outs() << "\n";
+
+                        EntryState.trackedRoots[RootPair.first].Entries[EntryPair.first] = Entry;
                     }
-                    EntryState.trackedRoots[RootPair.first] = PointsToMapping;
                 }
 
-                return EntryState;
+                RetVal = EntryState;
+                return true;
             }
 
             llvm::outs() << "Did not converge.\n";
@@ -550,16 +594,17 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             for(auto Pair : State.trackedRoots) {
                 auto& RootValue = Pair.first;
                 llvm::outs() << *RootValue << " [" << "\n";
-                for(auto& Entry : Pair.second.Entries) {
+                for(auto EntryPair : Pair.second.Entries) {
+                    auto& Entry = EntryPair.second;
                     llvm::outs() << "    " << *(Entry.SourceLocation) << " " << debugMappingToString(Entry.Mapping) << "\n";
                 }
                 llvm::outs() << " ]" << "\n";
             }
         }
 
-        std::string debugSetToString(isl_basic_set *Set) {
+        std::string debugSetToString(isl_set *Set) {
             auto Printer = isl_printer_to_str(IslContext);
-            isl_printer_print_basic_set(Printer, Set);
+            isl_printer_print_set(Printer, Set);
             char *Result = isl_printer_get_str(Printer);
             std::string RetVal(Result);
             isl_printer_free(Printer);
@@ -567,9 +612,9 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             return RetVal;
         }
 
-        std::string debugMappingToString(isl_basic_map *Map) {
+        std::string debugMappingToString(isl_map *Map) {
             auto Printer = isl_printer_to_str(IslContext);
-            Printer = isl_printer_print_basic_map(Printer, Map);
+            Printer = isl_printer_print_map(Printer, Map);
             char *Result = isl_printer_get_str(Printer);
             std::string RetVal(Result);
             isl_printer_free(Printer);
@@ -577,18 +622,18 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             return RetVal;
         }
 
-        void mergeParams(isl_basic_map*& First, isl_basic_map*& Second) {
-            auto Space = isl_basic_map_get_space(First);
-            Second = isl_basic_map_align_params(Second, Space);
-            Space = isl_basic_map_get_space(Second);
-            First = isl_basic_map_align_params(First, Space);
+        void mergeParams(isl_map*& First, isl_map*& Second) {
+            auto Space = isl_map_get_space(First);
+            Second = isl_map_align_params(Second, Space);
+            Space = isl_map_get_space(Second);
+            First = isl_map_align_params(First, Space);
         }
 
-        void mergeParams(isl_basic_set*& First, isl_basic_map*& Second) {
-            auto Space = isl_basic_set_get_space(First);
-            Second = isl_basic_map_align_params(Second, Space);
-            Space = isl_basic_map_get_space(Second);
-            First = isl_basic_set_align_params(First, Space);
+        void mergeParams(isl_set*& First, isl_map*& Second) {
+            auto Space = isl_set_get_space(First);
+            Second = isl_map_align_params(Second, Space);
+            Space = isl_map_get_space(Second);
+            First = isl_set_align_params(First, Space);
         }
 
         /**
@@ -601,10 +646,10 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
          * if the offset is 1, then x_1 in the smaller space will be mapped to x_2 in the larger space
          * and so on.
          */
-        isl_basic_map *constructEmbedderMapping(unsigned FromSize, unsigned ToSize, unsigned Offset = 0) {
+        isl_map *constructEmbedderMapping(unsigned FromSize, unsigned ToSize, unsigned Offset = 0) {
             // Create the basic mapping itself
             auto EmbedderSpace = isl_space_alloc(IslContext, 0, FromSize, ToSize);
-            auto EmbedderMapping = isl_basic_map_universe(EmbedderSpace);
+            auto EmbedderMapping = isl_map_universe(EmbedderSpace);
 
             // Generate constraints that map each variable in the smaller space to the corresponding
             // variable in the larger space.
@@ -615,7 +660,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                 Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_in, VariableIndex, -1);
                 Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_out, VariableIndex + Offset, 1);
-                EmbedderMapping = isl_basic_map_add_constraint(EmbedderMapping, Constraint);
+                EmbedderMapping = isl_map_add_constraint(EmbedderMapping, Constraint);
             }
 
             return EmbedderMapping;
@@ -625,23 +670,23 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
          * Generate a set of constraints for the subscript parameters of LeftHand under which
          * the heap object matches a heap object in RightHand.
          */
-        isl_basic_set *generateAliasConstraints(EWPTEntry& LeftHand, EWPTEntry& RightHand) {
+        isl_set *generateAliasConstraints(EWPTEntry& LeftHand, EWPTEntry& RightHand) {
             if(LeftHand.SourceLocation != RightHand.SourceLocation) {
                 auto IndexSpace = isl_space_alloc(IslContext, LeftHand.Depth, 0, 0);
-                return isl_basic_set_empty(IndexSpace);
+                return isl_set_empty(IndexSpace);
             }
 
             llvm::outs() << "LEFTHAND: " << debugMappingToString(LeftHand.Mapping) << "\n"; llvm::outs().flush();
             llvm::outs() << "RIGHTHAND: " << debugMappingToString(RightHand.Mapping) << "\n"; llvm::outs().flush();
             // Constrain the LeftHand mapping to those indices where it might map to a heap object in RightHand
-            auto AliasMapping = isl_basic_map_intersect_range(isl_basic_map_copy(LeftHand.Mapping), isl_basic_map_range(isl_basic_map_copy(RightHand.Mapping)));
-            llvm::outs() << "TEST: " << debugMappingToString(isl_basic_map_universe(isl_space_alloc(IslContext, 0, 1, 1))) << "\n"; llvm::outs().flush();
+            auto AliasMapping = isl_map_intersect_range(isl_map_copy(LeftHand.Mapping), isl_map_range(isl_map_copy(RightHand.Mapping)));
+            llvm::outs() << "TEST: " << debugMappingToString(isl_map_universe(isl_space_alloc(IslContext, 0, 1, 1))) << "\n"; llvm::outs().flush();
 
             llvm::outs() << "INTERSECTED:" << debugMappingToString(AliasMapping) << "\n"; llvm::outs().flush();
 
 
             // Extract the indices in this new constrained mapping as a set.
-            auto AliasSet = isl_basic_map_domain(AliasMapping);
+            auto AliasSet = isl_map_domain(AliasMapping);
             return AliasSet;
         }
 
@@ -656,7 +701,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
          * - We also carry over all the constraints for the subscripts of s
          * - We also add a constraint for x
          */
-        EWPTEntry generateEntryFromHeapAssignment(int EntranceDepth, isl_basic_set *EntranceConstraints, EWPTEntry& AssigneeMapping, llvm::Value *BridgeValue) {
+        EWPTEntry generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, llvm::Value *BridgeValue) {
             llvm::outs() << "Generate Heap Assignment:: EntranceDepth = " << EntranceDepth << ", EntranceConstraints = " << debugSetToString(EntranceConstraints) << ", AssigneeMapping = " << debugMappingToString(AssigneeMapping.Mapping) << ", BridgeValue = " << *BridgeValue << "\n";
 
             // The new mapping will have the following subscripts:
@@ -665,7 +710,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             // - The subscripts from the assignee mapping
             auto InputSize = EntranceDepth + 1 + AssigneeMapping.Depth;
             auto NewSpace = isl_space_alloc(IslContext, 0, InputSize, AssigneeMapping.AmountOfIterators);
-            auto NewMapping = isl_basic_map_universe(NewSpace);
+            auto NewMapping = isl_map_universe(NewSpace);
 
             // Embed subscript parameters (x_1, ..., x_d) of our entrance mapping into the domain space.
             // For this we need to create a map (x_1, ..., x_d) -> (x_1, ..., x_d,  ...)
@@ -673,24 +718,24 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             // First we need to convert our set of constraints for the entrance mapping into a set of constraints
             // for the larger space of the new mapping. For this, we create an embedder mapping, which is just
             // an identity function from the smaller space into the larger space.
-            auto AliasSetSize = isl_space_dim(isl_basic_set_get_space(EntranceConstraints), isl_dim_set);
+            auto AliasSetSize = isl_space_dim(isl_set_get_space(EntranceConstraints), isl_dim_set);
             auto EmbedderMapping = constructEmbedderMapping(AliasSetSize, InputSize);
 
             mergeParams(EntranceConstraints, EmbedderMapping);
-            auto FilterSpace = isl_basic_set_apply(isl_basic_set_copy(EntranceConstraints), EmbedderMapping);
+            auto FilterSpace = isl_set_apply(isl_set_copy(EntranceConstraints), EmbedderMapping);
 
             // Now we intersect our constraints for (x_1, ..., x_d) with the mapping, effectively adding these
             // constraints to the mapping we're generating.
             mergeParams(FilterSpace, NewMapping);
-            NewMapping = isl_basic_map_intersect_domain(NewMapping, FilterSpace);
+            NewMapping = isl_map_intersect_domain(NewMapping, FilterSpace);
 
             // Next we add a bridge constraint to our mapping. The bridge constraint is the constraint for
             // 'x' in the expression p[x] = q
             if(auto BridgeConstant = dyn_cast<ConstantInt>(BridgeValue)) {
-                auto BridgeConstraint = isl_equality_alloc(isl_local_space_from_space(isl_space_copy(isl_basic_map_get_space(NewMapping))));
+                auto BridgeConstraint = isl_equality_alloc(isl_local_space_from_space(isl_space_copy(isl_map_get_space(NewMapping))));
                 BridgeConstraint = isl_constraint_set_coefficient_si(BridgeConstraint, isl_dim_in, EntranceDepth, -1);
                 BridgeConstraint = isl_constraint_set_constant_si(BridgeConstraint, BridgeConstant->getSExtValue());
-                NewMapping = isl_basic_map_add_constraint(NewMapping, BridgeConstraint);
+                NewMapping = isl_map_add_constraint(NewMapping, BridgeConstraint);
             } else {
                 // TODO: parse the SCEV
 
@@ -701,15 +746,15 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                 auto Model = isl_space_params_alloc(IslContext, 1);
                 auto Identifier = isl_id_alloc(IslContext, ValueName.str().c_str(), SubscriptValue);
                 Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
-                NewMapping = isl_basic_map_align_params(NewMapping, Model);
+                NewMapping = isl_map_align_params(NewMapping, Model);
                 // TODO: GetIndexForFreeVariable(SubscriptValue);
 
                 // Next add a constraint for that parameter: x_d = param
-                isl_local_space *LocalSpace = isl_local_space_from_space(isl_basic_map_get_space(NewMapping));
+                isl_local_space *LocalSpace = isl_local_space_from_space(isl_map_get_space(NewMapping));
                 isl_constraint *NewConstraint = isl_equality_alloc(LocalSpace);
                 NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_in, EntranceDepth, -1);
                 NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_param, 0, 1);
-                NewMapping = isl_basic_map_add_constraint(NewMapping, NewConstraint);
+                NewMapping = isl_map_add_constraint(NewMapping, NewConstraint);
             }
 
             // We need to embed the constraints of the asignee mapping into the mapping we're generating.
@@ -719,11 +764,11 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             // by inverting the equivalent embedder mapping that goes from
             // (y_1, ..., y_k) to (x_1, ..., x_d, b, y_1, ..., y_k)
             EmbedderMapping = constructEmbedderMapping(AssigneeMapping.Depth, InputSize, EntranceDepth + 1);
-            EmbedderMapping = isl_basic_map_reverse(EmbedderMapping);
+            EmbedderMapping = isl_map_reverse(EmbedderMapping);
             // concatenate the functions: apply_range(g, f) = f(g)
-            auto AssigneeMappingCopy = isl_basic_map_copy(AssigneeMapping.Mapping);
+            auto AssigneeMappingCopy = isl_map_copy(AssigneeMapping.Mapping);
             mergeParams(EmbedderMapping, AssigneeMappingCopy);
-            auto EmbeddedAssigneeMapping = isl_basic_map_apply_range(EmbedderMapping, AssigneeMappingCopy);
+            auto EmbeddedAssigneeMapping = isl_map_apply_range(EmbedderMapping, AssigneeMappingCopy);
 
             llvm::outs() << "EmbeddedAssigneeMapping: " << debugMappingToString(EmbeddedAssigneeMapping) << "\n";
             llvm::outs().flush();
@@ -732,7 +777,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             // Now intersect this tail part into our generated mapping, essentially adding the constraints for
             // (y_1, ..., y_k)
             mergeParams(NewMapping, EmbeddedAssigneeMapping);
-            NewMapping = isl_basic_map_intersect(NewMapping, EmbeddedAssigneeMapping);
+            NewMapping = isl_map_intersect(NewMapping, EmbeddedAssigneeMapping);
 
             // Construct the EWPTEntry instance for the generated mapping.
             EWPTEntry NewEntry;
@@ -750,10 +795,11 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
          * Handle a heap assignment that involves a GEP, so something of the form
          * p[x] = q, where the address p[x] is calculated through a GEP instruction.
          */
-        void handleGEPHeapAssignment(GetElementPtrInst *TargetGEP, llvm::Value *AssignedValue, EWPTAliasAnalysisState& State) {
+        bool handleGEPHeapAssignment(GetElementPtrInst *TargetGEP, llvm::Value *AssignedValue, EWPTAliasAnalysisState& State) {
             if(TargetGEP->getNumIndices() != 1) {
                 // We can't deal with any number of indices but one.
-                return; // TODO Error Handling
+                llvm::outs() << "Wrong number of indices\n";
+                return false; // TODO Error Handling
             }
 
             llvm::Value *Index = TargetGEP->idx_begin()->get();
@@ -763,15 +809,17 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
             // Check that we have an EWPT root associated with our base pointer.
             if(!State.trackedRoots.count(BasePointer)) {
-                return; // TODO Error Handling
+                llvm::outs() << "Trying to assign to unknown value\n";
+                return false; // TODO Error Handling
             }
 
             // Get all EWPT entries of depth 0.
             std::vector<EWPTEntry> ModifiedHeapObjects;
             if(!State.trackedRoots.count(BasePointer)) {
-                return; // TODO: error handling
+                return false; // TODO: error handling
             }
-            for(EWPTEntry& Entry : State.trackedRoots[BasePointer].Entries) {
+            for(auto EntryPair : State.trackedRoots[BasePointer].Entries) {
+                auto& Entry = EntryPair.second;
                 if(Entry.Depth == 0) {
                     llvm::outs() << "Found entry of depth 0 " << *(Entry.SourceLocation) << "\n";
                     ModifiedHeapObjects.push_back(Entry);
@@ -789,55 +837,65 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                     // Make a copy of the entries, as we may modify them.
                     auto Entries = RootMapping.Entries;
-                    for(EWPTEntry& PossibleAlias : Entries) if(PossibleAlias.SourceLocation == ModifiedHeapObject.SourceLocation) {
-                        auto EntranceConstraints = generateAliasConstraints(PossibleAlias, ModifiedHeapObject);
-                        if(isl_basic_set_is_empty(EntranceConstraints)) {
-                            continue;
-                        }
+                    for(auto PossibleAliasPair : Entries) {
+                        auto& PossibleAlias = PossibleAliasPair.second;
+                        if(PossibleAlias.SourceLocation == ModifiedHeapObject.SourceLocation) {
+                            auto EntranceConstraints = generateAliasConstraints(PossibleAlias, ModifiedHeapObject);
+                            if(isl_set_is_empty(EntranceConstraints)) {
+                                continue;
+                            }
 
-                        llvm::outs() << "Found matching EWPT root " << *(RootPair.first) << " with constraints " << debugSetToString(EntranceConstraints) << "\n";
-                        llvm::outs().flush();
+                            llvm::outs() << "Found matching EWPT root " << *(RootPair.first) << " with constraints " << debugSetToString(EntranceConstraints) << "\n";
+                            llvm::outs().flush();
 
-                        // Now build new mappings from our set for aliasing x_1, ..., x_d, the
-                        // transition subscript x_{d+1} = x, and each EWPT in q
+                            // Now build new mappings from our set for aliasing x_1, ..., x_d, the
+                            // transition subscript x_{d+1} = x, and each EWPT in q
 
-                        // Make a copy, as we might be adding to these entries in the loop
-                        if(!State.trackedRoots.count(AssignedValue)) {
-                            // TODO: error message
-                            return;
-                        }
-                        auto Entries = State.trackedRoots[AssignedValue].Entries;
-                        for(EWPTEntry& TailMapping : Entries) {
-                            llvm::outs() << "Found tail for " << *AssignedValue << ": "; TailMapping.debugPrint(*this); llvm::outs() << "\n"; llvm::outs().flush();
-                            auto NewEntry = generateEntryFromHeapAssignment(PossibleAlias.Depth, EntranceConstraints, TailMapping, Index);
-                            RootMapping.Entries.push_back(NewEntry);
+                            // Make a copy, as we might be adding to these entries in the loop
+                            if(!State.trackedRoots.count(AssignedValue)) {
+                                // TODO: error message
+                                return false;
+                            }
+                            auto Entries = State.trackedRoots[AssignedValue].Entries;
+                            for(auto TailMappingPair : Entries) {
+                                auto& TailMapping = TailMappingPair.second;
+                                llvm::outs() << "Found tail for " << *AssignedValue << ": "; TailMapping.debugPrint(*this); llvm::outs() << "\n"; llvm::outs().flush();
+                                auto NewEntry = generateEntryFromHeapAssignment(PossibleAlias.Depth, EntranceConstraints, TailMapping, Index);
+                                auto KeyForNewEntry = std::make_pair(NewEntry.Depth, NewEntry.SourceLocation);
+                                RootMapping.Entries[KeyForNewEntry] = NewEntry; // TODO: merge it with existing entry
+                            }
                         }
                     }
                 }
             }
+
+            return true;
         }
 
-        void handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State) {
+        bool handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State) {
             if(auto CurrentGEPInst = dyn_cast<GetElementPtrInst>(AssigningInstruction->getPointerOperand())) {
-                handleGEPHeapAssignment(CurrentGEPInst, AssigningInstruction->getValueOperand()->stripPointerCasts(), State);
+                return handleGEPHeapAssignment(CurrentGEPInst, AssigningInstruction->getValueOperand()->stripPointerCasts(), State);
+            } else {
+                // TODO error message
+                return false;
             }
         }
 
-        void handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
+        bool handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
             llvm::outs() << "Handling Load\n";
 
             const SCEV *AccessFunction = SE->getSCEVAtScope(CurrentLoadInst->getPointerOperand(), Frame.RestrictToLoop);
             auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
 
             if (!BasePointer) {
-                llvm::errs() << "Can not handle base pointer for " << *CurrentLoadInst << "\n";
+                llvm::outs() << "Can not handle base pointer for " << *CurrentLoadInst << "\n";
                 exit(1);
             }
 
             auto BaseValue = BasePointer->getValue();
 
             if (isa<UndefValue>(BaseValue)) {
-                llvm::errs() << "Can not handle base value for " << *CurrentLoadInst << "\n";
+                llvm::outs() << "Can not handle base value for " << *CurrentLoadInst << "\n";
                 exit(1);
             }
 
@@ -851,21 +909,27 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                 EWPTRoot NewRoot = LoadedFrom.ApplySubscript(*this, Offset, Frame, State);
                 State.trackedRoots[CurrentLoadInst] = NewRoot;
             }
+
+            return true;
         }
 
-        EWPTAliasAnalysisState runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Frame, EWPTAliasAnalysisState& InState)
+        bool runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Frame, EWPTAliasAnalysisState& InState, EWPTAliasAnalysisState& RetValState)
         {
-            EWPTAliasAnalysisState RetValState = InState.clone();
+            RetValState = InState.clone();
             for(Instruction &CurrentInstruction : block.getInstList()) {
                 llvm::outs() << "Handling instruction " << CurrentInstruction << "\n";
 
                 // Case: p = q[x]
                 if (LoadInst *CurrentLoadInst = dyn_cast<LoadInst>(&CurrentInstruction)) {
-                    handleLoad(CurrentLoadInst, Frame, RetValState);
+                    if(!handleLoad(CurrentLoadInst, Frame, RetValState)) {
+                        return false;
+                    }
                 }
                 // Case: p[x] = q
                 else if (StoreInst *CurrentStoreInst = dyn_cast<StoreInst>(&CurrentInstruction)) {
-                    handleHeapAssignment(CurrentStoreInst, RetValState);
+                    if(!handleHeapAssignment(CurrentStoreInst, RetValState)) {
+                        return false;
+                    }
                 }
 
                 // Case: p = phi x, y
@@ -906,7 +970,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                         Space = isl_space_set_dim_id(Space, isl_dim_param, I, Identifier);
                     }
 
-                    Entry.Mapping = isl_basic_map_universe(isl_space_copy(Space));
+                    Entry.Mapping = isl_map_universe(isl_space_copy(Space));
 
                     for(unsigned I = 0; I < Iterators.size(); I++) {
                         // For each iterator i we need a constraint that
@@ -915,10 +979,11 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, I, -1);
                         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_out, I, 1);
-                        Entry.Mapping = isl_basic_map_add_constraint(Entry.Mapping, Constraint);
+                        Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
                     }
 
-                    Root.Entries.push_back(Entry);
+                    auto KeyForNewEntry = std::make_pair(Entry.Depth, Entry.SourceLocation);
+                    Root.Entries[KeyForNewEntry] = Entry;
                     RetValState.trackedRoots[&CurrentInstruction] = Root;
 
                     llvm::outs() << "Added new 0 depth entry for " << CurrentInstruction << "\n";
@@ -926,7 +991,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                 }
             }
 
-            return RetValState;
+            return true;
         }
 
         void getAnalysisUsage(AnalysisUsage &AU) const
@@ -949,6 +1014,17 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         isl_ctx *getIslContext() {
             return IslContext;
         }
+
+        AliasAnalysis::AliasResult alias(const Location& LocA, const Location& LocB) {
+            auto PtrA = LocA.Ptr;
+            auto PtrB = LocB.Ptr;
+
+            // Check if we have EWPTs for these pointers.
+
+
+            return AliasAnalysis::alias(LocA, LocB);
+        }
+
 };
 
 void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
@@ -963,11 +1039,11 @@ void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
             // is the first mapping parameter that we're projecting out.
             int64_t ConstValue = ConstSubscript->getSExtValue();
             llvm::outs() << "Adding constraint x_1=" << ConstValue << " to " << Analysis.debugMappingToString(Mapping) << "\n";
-            isl_local_space *LocalSpace = isl_local_space_from_space(isl_basic_map_get_space(Mapping));
+            isl_local_space *LocalSpace = isl_local_space_from_space(isl_map_get_space(Mapping));
             isl_constraint *NewConstraint = isl_equality_alloc(LocalSpace);
             NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_in, 0, -1);
             NewConstraint = isl_constraint_set_constant_si(NewConstraint, ConstValue);
-            Mapping = isl_basic_map_add_constraint(Mapping, NewConstraint);
+            Mapping = isl_map_add_constraint(Mapping, NewConstraint);
         }
         else {
             // TODO: parse the SCEV
@@ -980,20 +1056,20 @@ void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
             auto Model = isl_space_params_alloc(Analysis.IslContext, 1);
             auto Identifier = isl_id_alloc(Analysis.IslContext, ValueName.str().c_str(), SubscriptValue);
             Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
-            Mapping = isl_basic_map_align_params(Mapping, Model);
+            Mapping = isl_map_align_params(Mapping, Model);
             GetIndexForFreeVariable(SubscriptValue);
 
             // Next add a constraint for that first parameter: x_1 = param
-            isl_local_space *LocalSpace = isl_local_space_from_space(isl_basic_map_get_space(Mapping));
+            isl_local_space *LocalSpace = isl_local_space_from_space(isl_map_get_space(Mapping));
             isl_constraint *NewConstraint = isl_equality_alloc(LocalSpace);
             NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_in, 0, -1);
             NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_param, 0, 1);
-            Mapping = isl_basic_map_add_constraint(Mapping, NewConstraint);
+            Mapping = isl_map_add_constraint(Mapping, NewConstraint);
         }
     }
 
     // Project out the first input dimension.
-    Mapping = isl_basic_map_project_out(Mapping, isl_dim_in, 0, 1);
+    Mapping = isl_map_project_out(Mapping, isl_dim_in, 0, 1);
     Depth = Depth - 1;
 
     llvm::outs() << "After subscript application: "; this->debugPrint(Analysis); llvm::outs() << "\n";
