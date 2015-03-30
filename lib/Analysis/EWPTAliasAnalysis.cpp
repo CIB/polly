@@ -42,10 +42,10 @@ public:
     { }
 
     /**
-     * The amount of parameters x_1, x_2, ..., x_d, where d is the
-     * depth of this entry.
+     * The amount of subscript parameters x_1, x_2, ..., x_d,
+     * where d is the rank of this entry.
      */
-    unsigned Depth;
+    unsigned Rank;
 
     /**
      * The amount of iteration indices a_1, ..., a_k by which the heap
@@ -101,12 +101,22 @@ public:
     }
 
     EWPTEntry merge(EWPTEntry& Other) {
-        assert(Depth == Other.Depth && AmountOfIterators == Other.AmountOfIterators);
+        assert(Rank == Other.Rank && AmountOfIterators == Other.AmountOfIterators);
 
         EWPTEntry RetVal = *this;
         auto Mapping1 = isl_map_copy(Mapping);
         auto Mapping2 = isl_map_copy(Other.Mapping);
         RetVal.Mapping = isl_map_union(Mapping1, Mapping2);
+        return RetVal;
+    }
+
+    EWPTEntry intersect(EWPTEntry& Other) {
+        assert(Rank == Other.Rank && AmountOfIterators == Other.AmountOfIterators);
+
+        EWPTEntry RetVal = *this;
+        auto Mapping1 = isl_map_copy(Mapping);
+        auto Mapping2 = isl_map_copy(Other.Mapping);
+        RetVal.Mapping = isl_map_intersect(Mapping1, Mapping2);
         return RetVal;
     }
 
@@ -129,7 +139,7 @@ public:
         EWPTRoot RetVal;
         for(auto EntryPair : Entries) {
             auto& Entry = EntryPair.second;
-            if(Entry.Depth > 0) {
+            if(Entry.Rank > 0) {
                 RetVal.Entries[EntryPair.first] = Entry.ApplySubscript(Analysis, Subscript, Frame, State);
             }
         }
@@ -161,6 +171,26 @@ public:
                 MergedEntry = Entries[EntryKey].merge(Other.Entries[EntryKey]);
             }
             RetVal.Entries[EntryKey] = MergedEntry;
+        }
+        return RetVal;
+    }
+
+    EWPTRoot intersect(EWPTRoot& Other, unsigned Rank) {
+        EWPTRoot RetVal;
+
+        auto AllKeys = getCombinedKeys(Other);
+        for(auto EntryKey : AllKeys) {
+            if(EntryKey.first != Rank) {
+                continue;
+            }
+            if(!Entries.count(EntryKey) || !Other.Entries.count(EntryKey)) {
+                continue;
+            } else {
+                auto MergedEntry = Entries[EntryKey].merge(Other.Entries[EntryKey]);
+                if(!isl_map_is_empty(MergedEntry.Mapping)) {
+                    RetVal.Entries[EntryKey] = MergedEntry;
+                }
+            }
         }
         return RetVal;
     }
@@ -276,7 +306,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
         isl_ctx *IslContext;
 
-        EWPTAliasAnalysisState FinalState;
+        EWPTAliasAnalysisFrame Frame;
 
         EWPTAliasAnalysis() : FunctionPass(ID)
         {
@@ -294,7 +324,6 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             InitializeAliasAnalysis(this);
 
             // The actual analysis.
-            EWPTAliasAnalysisFrame Frame;
             auto BeginBlock = &(F.getEntryBlock());
             Frame.BeginBlocks.insert(BeginBlock);
             Frame.RestrictToLoop = NULL;
@@ -672,7 +701,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
          */
         isl_set *generateAliasConstraints(EWPTEntry& LeftHand, EWPTEntry& RightHand) {
             if(LeftHand.SourceLocation != RightHand.SourceLocation) {
-                auto IndexSpace = isl_space_alloc(IslContext, LeftHand.Depth, 0, 0);
+                auto IndexSpace = isl_space_alloc(IslContext, LeftHand.Rank, 0, 0);
                 return isl_set_empty(IndexSpace);
             }
 
@@ -708,7 +737,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             // - The subscripts from the entrance mapping
             // - One subscript for the bridge
             // - The subscripts from the assignee mapping
-            auto InputSize = EntranceDepth + 1 + AssigneeMapping.Depth;
+            auto InputSize = EntranceDepth + 1 + AssigneeMapping.Rank;
             auto NewSpace = isl_space_alloc(IslContext, 0, InputSize, AssigneeMapping.AmountOfIterators);
             auto NewMapping = isl_map_universe(NewSpace);
 
@@ -738,6 +767,8 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                 NewMapping = isl_map_add_constraint(NewMapping, BridgeConstraint);
             } else {
                 // TODO: parse the SCEV
+                const SCEV *Subscript = SE->getSCEVAtScope(BridgeValue, Frame.RestrictToLoop);
+                llvm::outs() << "Store SCEV expression:" << *Subscript << "\n";
 
                 // First realign the isl map's parameters so that the free variable we're dealing with
                 // becomes the first parameter.
@@ -763,7 +794,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             // (x_1, ..., x_d, b, y_1, ..., y_k) to (y_1, ..., y_k). We can create this projection mapping
             // by inverting the equivalent embedder mapping that goes from
             // (y_1, ..., y_k) to (x_1, ..., x_d, b, y_1, ..., y_k)
-            EmbedderMapping = constructEmbedderMapping(AssigneeMapping.Depth, InputSize, EntranceDepth + 1);
+            EmbedderMapping = constructEmbedderMapping(AssigneeMapping.Rank, InputSize, EntranceDepth + 1);
             EmbedderMapping = isl_map_reverse(EmbedderMapping);
             // concatenate the functions: apply_range(g, f) = f(g)
             auto AssigneeMappingCopy = isl_map_copy(AssigneeMapping.Mapping);
@@ -783,7 +814,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             EWPTEntry NewEntry;
             NewEntry.AmountOfIterators = AssigneeMapping.AmountOfIterators;
             NewEntry.SourceLocation = AssigneeMapping.SourceLocation;
-            NewEntry.Depth = InputSize;
+            NewEntry.Rank = InputSize;
             NewEntry.Mapping = NewMapping;
 
             llvm::outs() << "Result: " << debugMappingToString(NewMapping) << "\n";
@@ -820,7 +851,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
             }
             for(auto EntryPair : State.trackedRoots[BasePointer].Entries) {
                 auto& Entry = EntryPair.second;
-                if(Entry.Depth == 0) {
+                if(Entry.Rank == 0) {
                     llvm::outs() << "Found entry of depth 0 " << *(Entry.SourceLocation) << "\n";
                     ModifiedHeapObjects.push_back(Entry);
                 }
@@ -860,8 +891,8 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                             for(auto TailMappingPair : Entries) {
                                 auto& TailMapping = TailMappingPair.second;
                                 llvm::outs() << "Found tail for " << *AssignedValue << ": "; TailMapping.debugPrint(*this); llvm::outs() << "\n"; llvm::outs().flush();
-                                auto NewEntry = generateEntryFromHeapAssignment(PossibleAlias.Depth, EntranceConstraints, TailMapping, Index);
-                                auto KeyForNewEntry = std::make_pair(NewEntry.Depth, NewEntry.SourceLocation);
+                                auto NewEntry = generateEntryFromHeapAssignment(PossibleAlias.Rank, EntranceConstraints, TailMapping, Index);
+                                auto KeyForNewEntry = std::make_pair(NewEntry.Rank, NewEntry.SourceLocation);
                                 RootMapping.Entries[KeyForNewEntry] = NewEntry; // TODO: merge it with existing entry
                             }
                         }
@@ -958,7 +989,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
                     Entry.AmountOfIterators = Iterators.size();
                     Entry.SourceLocation = &CurrentInstruction;
-                    Entry.Depth = 0;
+                    Entry.Rank = 0;
 
                     auto Space = isl_space_alloc(IslContext, Entry.AmountOfIterators, 0, Entry.AmountOfIterators);
 
@@ -982,7 +1013,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
                         Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
                     }
 
-                    auto KeyForNewEntry = std::make_pair(Entry.Depth, Entry.SourceLocation);
+                    auto KeyForNewEntry = std::make_pair(Entry.Rank, Entry.SourceLocation);
                     Root.Entries[KeyForNewEntry] = Entry;
                     RetValState.trackedRoots[&CurrentInstruction] = Root;
 
@@ -1016,13 +1047,39 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         }
 
         AliasAnalysis::AliasResult alias(const Location& LocA, const Location& LocB) {
-            auto PtrA = LocA.Ptr;
-            auto PtrB = LocB.Ptr;
+            auto PtrA = (Instruction*) llvm::dyn_cast<Instruction>(LocA.Ptr);
+            auto PtrB = (Instruction*) llvm::dyn_cast<Instruction>(LocB.Ptr);
 
-            // Check if we have EWPTs for these pointers.
+            if(!PtrA || !PtrB) {
+                return AliasAnalysis::alias(LocA, LocB);
+            }
 
+            // For now, only compare pointers in the same basic block.
+            if(PtrA->getParent() != PtrB->getParent()) {
+                return AliasAnalysis::alias(LocA, LocB);
+            }
 
-            return AliasAnalysis::alias(LocA, LocB);
+            BasicBlock* ContainerBlock = (BasicBlock*) PtrA->getParent();
+            auto OutState = Frame.BlockOutStates[ContainerBlock];
+
+            // Get EWPTs for A and B in that state.
+            auto RootA = OutState.trackedRoots[PtrA];
+            auto RootB = OutState.trackedRoots[PtrB];
+
+            // TODO: If both EWPTs are single-valued and equivalent
+            // at rank 0, we have a must-alias.
+
+            // Intersect EWPTs at rank 0.
+            auto Intersection = RootA.intersect(RootB, 0);
+
+            // Check how many elements there are in the intersection.
+            // If there's none, NoAlias. Otherwise, mayalias.
+            bool FoundOneEntry = false;
+            if(!Intersection.Entries.size()) {
+                return AliasAnalysis::NoAlias;
+            } else {
+                return AliasAnalysis::MayAlias;
+            }
         }
 
 };
@@ -1070,13 +1127,13 @@ void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
 
     // Project out the first input dimension.
     Mapping = isl_map_project_out(Mapping, isl_dim_in, 0, 1);
-    Depth = Depth - 1;
+    Rank = Rank - 1;
 
     llvm::outs() << "After subscript application: "; this->debugPrint(Analysis); llvm::outs() << "\n";
 }
 
 void EWPTEntry::debugPrint(EWPTAliasAnalysis &Analysis) {
-    llvm::outs() << "<" << *SourceLocation << " : " << Analysis.debugMappingToString(Mapping) << ">(Depth:" << Depth << ")\n";
+    llvm::outs() << "<" << *SourceLocation << " : " << Analysis.debugMappingToString(Mapping) << ">(Depth:" << Rank << ")\n";
 }
 
 char EWPTAliasAnalysis::ID = 0;
