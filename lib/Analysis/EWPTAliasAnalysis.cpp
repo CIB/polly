@@ -21,6 +21,8 @@
 #include "polly/EWPTAliasAnalysis.h"
 
 
+#define DEBUG_PRINT_ALIAS 1
+
 using namespace llvm;
 
 // ============================
@@ -64,8 +66,9 @@ EWPTEntry EWPTEntry::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV* Sub
 void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
     // We need to substitute and project out the first parameter in the input dimension.
 
-    //llvm::outs() << "Attempting to apply subscript " << *Subscript << " to "; this->debugPrint(Analysis); llvm::outs() << "\n";
+    llvm::outs() << "Attempting to apply subscript " << *Subscript << " to "; this->debugPrint(Analysis); llvm::outs() << "\n";
 
+    bool HasConstantValue = false;
     if(auto SubscriptUnknown = dyn_cast<SCEVUnknown>(Subscript)) {
         auto SubscriptValue = SubscriptUnknown->getValue();
         if(auto ConstSubscript = dyn_cast<llvm::ConstantInt>(SubscriptValue)) {
@@ -78,27 +81,42 @@ void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
             NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_in, 0, -1);
             NewConstraint = isl_constraint_set_constant_si(NewConstraint, ConstValue);
             Mapping = isl_map_add_constraint(Mapping, NewConstraint);
+            HasConstantValue = true;
         }
-        else {
-            // TODO: parse the SCEV
+    }
 
-            // Have to treat it as parameter.
-
-            // First realign the isl map's parameters so that the free variable we're dealing with
-            // becomes the first parameter.
-            auto ValueName = SubscriptValue->getName();
-            auto Model = isl_space_params_alloc(Analysis.IslContext, 1);
-            auto Identifier = isl_id_alloc(Analysis.IslContext, ValueName.str().c_str(), SubscriptValue);
-            Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
-            Mapping = isl_map_align_params(Mapping, Model);
-
-            // Next add a constraint for that first parameter: x_1 = param
-            isl_local_space *LocalSpace = isl_local_space_from_space(isl_map_get_space(Mapping));
-            isl_constraint *NewConstraint = isl_equality_alloc(LocalSpace);
-            NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_in, 0, -1);
-            NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_param, 0, 1);
-            Mapping = isl_map_add_constraint(Mapping, NewConstraint);
+    if(!HasConstantValue) {
+        llvm::Value *SubscriptValue;
+        if(auto SubscriptRec = dyn_cast<SCEVAddRecExpr>(Subscript)) {
+            SubscriptValue = SubscriptRec->getLoop()->getCanonicalInductionVariable();
+        } else if(auto SubscriptUnknown = dyn_cast<SCEVUnknown>(Subscript)) {
+            SubscriptValue = SubscriptUnknown->getValue();
+        } else {
+            llvm::outs() << "Invalid SCEV: " << *Subscript << "\n";
+            exit(1);
         }
+
+        // TODO: parse the SCEV
+        llvm::outs() << "mapping before adding constraint: " << Analysis.debugMappingToString(Mapping);
+
+        // Have to treat it as parameter.
+
+        // First realign the isl map's parameters so that the free variable we're dealing with
+        // becomes the first parameter.
+        auto ValueName = SubscriptValue->getName();
+        auto Model = isl_space_params_alloc(Analysis.IslContext, 1);
+        auto Identifier = isl_id_alloc(Analysis.IslContext, ValueName.str().c_str(), SubscriptValue);
+        Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
+        Mapping = isl_map_align_params(Mapping, Model);
+
+        // Next add a constraint for that first parameter: x_1 = param
+        isl_local_space *LocalSpace = isl_local_space_from_space(isl_map_get_space(Mapping));
+        isl_constraint *NewConstraint = isl_equality_alloc(LocalSpace);
+        NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_in, 0, -1);
+        NewConstraint = isl_constraint_set_coefficient_si(NewConstraint, isl_dim_param, 0, 1);
+        Mapping = isl_map_add_constraint(Mapping, NewConstraint);
+
+        llvm::outs() << "mapping after adding constraint: " << Analysis.debugMappingToString(Mapping);
     }
 
     // Project out the first input dimension.
@@ -123,9 +141,11 @@ bool EWPTEntry::isSingleValued() {
 EWPTRoot EWPTRoot::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
     EWPTRoot RetVal;
     for(auto EntryPair : Entries) {
+        auto NewKey = EntryPair.first;
+        NewKey.first = NewKey.first - 1;
         auto& Entry = EntryPair.second;
         if(Entry.Rank > 0) {
-            RetVal.Entries[EntryPair.first] = Entry.ApplySubscript(Analysis, Subscript, Frame, State);
+            RetVal.Entries[NewKey] = Entry.ApplySubscript(Analysis, Subscript, Frame, State);
         }
     }
     return RetVal;
@@ -171,9 +191,9 @@ EWPTRoot EWPTRoot::intersect(EWPTRoot& Other, unsigned Rank) {
         if(!Entries.count(EntryKey) || !Other.Entries.count(EntryKey)) {
             continue;
         } else {
-            auto MergedEntry = Entries[EntryKey].merge(Other.Entries[EntryKey]);
-            if(!isl_map_is_empty(MergedEntry.Mapping)) {
-                RetVal.Entries[EntryKey] = MergedEntry;
+            auto IntersectedEntry = Entries[EntryKey].intersect(Other.Entries[EntryKey]);
+            if(!isl_map_is_empty(IntersectedEntry.Mapping)) {
+                RetVal.Entries[EntryKey] = IntersectedEntry;
             }
         }
     }
@@ -211,12 +231,25 @@ std::vector<EWPTEntry*> EWPTRoot::getEntriesAtRank(unsigned Rank) {
     return RetVal;
 }
 
-bool EWPTRoot::isSingleValued() {
+EWPTEntry *EWPTRoot::isSingleValued() {
     auto EntriesAtRankZero = getEntriesAtRank(0);
     if(EntriesAtRankZero.size() != 1) {
-        return false;
+        return NULL;
     }
-    return EntriesAtRankZero[0]->isSingleValued();
+    if(EntriesAtRankZero[0]->isSingleValued()) {
+        return EntriesAtRankZero[0];
+    } else {
+        return NULL;
+    }
+}
+
+void EWPTRoot::debugPrint(EWPTAliasAnalysis &Analysis) {
+    llvm::outs() << "{\n";
+    for(auto EntryPair : Entries) {
+        auto& Entry = EntryPair.second;
+        llvm::outs() << "    (" << Entry.SourceLocation->getName() << ", " << Entry.Rank << ":" << EntryPair.first.first << ")\t->\t" << Analysis.debugMappingToString(Entry.Mapping) << "\n";
+    }
+    llvm::outs() << "}" << "\n";
 }
 
 // ==================================
@@ -291,7 +324,7 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
     iterativeControlFlowAnalysis(Frame);
 
     // Print the merged state of all exit blocks
-    std::vector<BasicBlock*> ExitBlocks;
+    /*std::vector<BasicBlock*> ExitBlocks;
     for(Function::iterator I = F.begin(), E = F.end(); I != E; ++I) {
         if(isa<ReturnInst>(I->getTerminator())) {
             ExitBlocks.push_back(I);
@@ -303,7 +336,7 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
         StatesToMerge.push_back(&(Frame.BlockOutStates[ExitBlock]));
     }
     auto ExitState = MergeStates(StatesToMerge);
-    debugPrintEWPTs(ExitState);
+    debugPrintEWPTs(ExitState);*/
 
     return false;
 }
@@ -429,6 +462,8 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         exit(1);
     }
 
+    llvm::outs() << "(loop) Entering loop " << LoopHeader.getName() << "\n";
+
     // The loop must also be dominated by its header and all edges from outside the loop
     // must point toward the loop header, but these are already requirements for "natural loops"
     // as recognized by LoopInfo.
@@ -471,6 +506,25 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
         // Extract the out state of the loop header (later: all loop exits)
         ExitState = SubFrame.BlockOutStates[SubFrame.Exit];
+
+        // Before aging and binding, we need to propagate all the states of the
+        // loop body blocks to the super frame.
+        for(auto Pair : SubFrame.BlockOutStates) {
+            if(!LoopToAnalyze.contains(Pair.first)) {
+                continue;
+            }
+            if(Pair.first != &LoopHeader) {
+                // Merge it into the super frame.
+                if(!SuperFrame.BlockOutStates.count(Pair.first)) {
+                    SuperFrame.BlockOutStates[Pair.first] = Pair.second.clone();
+                } else {
+                    SuperFrame.BlockOutStates[Pair.first] = SuperFrame.BlockOutStates[Pair.first].merge(Pair.second);
+                }
+                llvm::outs() << "Propagating up \n" << Pair.first->getName() << ":::::\n";
+                debugPrintEWPTs(SuperFrame.BlockOutStates[Pair.first]);
+                llvm::outs() << "\n";
+            }
+        }
 
         //llvm::outs() << "State before aging.\n";
         //debugPrintEWPTs(ExitState);
@@ -516,6 +570,22 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
                 Constraint = isl_constraint_set_constant_si(Constraint, -1);
                 Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
                 Entry.Mapping = isl_map_project_out(Entry.Mapping, isl_dim_param, 1, 1);
+
+                // Project out parameter dimensions that aren't constant, unless they're the iterator.
+                for(int i = 0; i < isl_space_dim(isl_map_get_space(Entry.Mapping), isl_dim_param); i++) {
+                    auto DimIdentifier = isl_space_get_dim_id(isl_map_get_space(Entry.Mapping), isl_dim_param, i);
+
+                    llvm::Value *Variable = (llvm::Value*) isl_id_get_user(DimIdentifier);
+                    // Check if it's constant
+                    if(Variable == InductionVariable) {
+                        continue;
+                    }
+                    if(!SubFrame.RestrictToLoop->isLoopInvariant(Variable)) {
+                        // Not constant, must project it out.
+                        Entry.Mapping = isl_map_project_out(Entry.Mapping, isl_dim_param, i, 1);
+                        i--;
+                    }
+                }
 
                 ExitState.trackedRoots[RootPair.first].Entries[EntryPair.first] = Entry;
 
@@ -568,6 +638,7 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         }
 
         RetVal = EntryState;
+        llvm::outs() << "(loop) Exiting loop " << LoopHeader.getName() << "\n";
         return true;
     }
 
@@ -605,15 +676,9 @@ void EWPTAliasAnalysis::debugPrintEWPTs(EWPTAliasAnalysisState& State) {
         }
 
         auto& RootValue = Pair.first;
-        if(RootValue->getName() == "") {
-            continue;
-        }
-        llvm::outs() << RootValue->getName() << " -> {" << "\n";
-        for(auto EntryPair : Pair.second.Entries) {
-            auto& Entry = EntryPair.second;
-            llvm::outs() << "    (" << Entry.SourceLocation->getName() << ", " << Entry.Rank << ")\t->\t" << debugMappingToString(Entry.Mapping) << "\n";
-        }
-        llvm::outs() << "}" << "\n";
+        llvm::outs() << "<" << *RootValue << "> -> ";
+
+        Pair.second.debugPrint(*this);
     }
 }
 
@@ -905,14 +970,14 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
     auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
 
     if (!BasePointer) {
-        //llvm::outs() << "Can not handle base pointer for " << *CurrentLoadInst << "\n";
+        llvm::outs() << "Can not handle base pointer for " << *CurrentLoadInst << "\n";
         exit(1);
     }
 
     auto BaseValue = BasePointer->getValue();
 
     if (isa<UndefValue>(BaseValue)) {
-        //llvm::outs() << "Can not handle base value for " << *CurrentLoadInst << "\n";
+        llvm::outs() << "Can not handle base value for " << *CurrentLoadInst << "\n";
         exit(1);
     }
 
@@ -926,7 +991,6 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
         EWPTRoot NewRoot = LoadedFrom.ApplySubscript(*this, Offset, Frame, State);
         State.trackedRoots[CurrentLoadInst] = NewRoot;
 
-        //llvm::outs() << "State after load:\n";
         //debugPrintEWPTs(State);
     }
 
@@ -1007,6 +1071,9 @@ bool EWPTAliasAnalysis::runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Fr
             //llvm::outs() << "Added new 0 depth entry for " << CurrentInstruction << "\n";
             //llvm::outs() << "New constraints: " << debugMappingToString(Entry.Mapping) << "\n";
         }
+
+        llvm::outs() << "State after handling instruction " << CurrentInstruction << ":\n";
+        debugPrintEWPTs(RetValState);
     }
 
     return true;
@@ -1033,19 +1100,36 @@ isl_ctx *EWPTAliasAnalysis::getIslContext() {
     return IslContext;
 }
 
+bool instructionIsHandled(Instruction *Instr) {
+    return llvm::dyn_cast<llvm::LoadInst>(Instr) || llvm::dyn_cast<llvm::StoreInst>(Instr) || llvm::dyn_cast<llvm::PHINode>(Instr) || llvm::isNoAliasCall(Instr);
+}
+
 AliasAnalysis::AliasResult EWPTAliasAnalysis::alias(const Location& LocA, const Location& LocB) {
-    auto PtrA = (Instruction*) llvm::dyn_cast<Instruction>(LocA.Ptr);
-    auto PtrB = (Instruction*) llvm::dyn_cast<Instruction>(LocB.Ptr);
+    auto PtrA = (Instruction*) llvm::dyn_cast<Instruction>(LocA.Ptr->stripPointerCasts());
+    auto PtrB = (Instruction*) llvm::dyn_cast<Instruction>(LocB.Ptr->stripPointerCasts());
 
     if(!PtrA || !PtrB) {
+#ifdef DEBUG_PRINT_ALIAS
+        llvm::outs() << "Locations given aren't instructions, returning MayAlias\n";
+#endif
+        return AliasAnalysis::alias(LocA, LocB);
+    }
+
+    if(!instructionIsHandled(PtrA) || !instructionIsHandled(PtrB)) {
+#ifdef DEBUG_PRINT_ALIAS
+        llvm::outs() << "Instructions of unhandled type, returning MayAlias\n";
+#endif
         return AliasAnalysis::alias(LocA, LocB);
     }
 
     BasicBlock* ContainerBlockA = (BasicBlock*) PtrA->getParent();
-    BasicBlock* ContainerBlockB = (BasicBlock*) PtrA->getParent();
+    BasicBlock* ContainerBlockB = (BasicBlock*) PtrB->getParent();
 
     if(!Frame.BlockOutStates.count(ContainerBlockA) ||
        !Frame.BlockOutStates.count(ContainerBlockB)) {
+#ifdef DEBUG_PRINT_ALIAS
+        llvm::outs() << "Incomplete analysis returning MayAlias\n";
+#endif
         return AliasAnalysis::alias(LocA, LocB);
     }
 
@@ -1056,18 +1140,34 @@ AliasAnalysis::AliasResult EWPTAliasAnalysis::alias(const Location& LocA, const 
     auto RootA = OutStateA.trackedRoots[PtrA];
     auto RootB = OutStateB.trackedRoots[PtrB];
 
-    /*llvm::outs() << "Alias check for " << *PtrA << " and " << *PtrB << "(SV: " << RootA.isSingleValued() << " Match: " << RootA.equals(RootB) << ")\n";
+#ifdef DEBUG_PRINT_ALIAS
+    llvm::outs() << "Alias check for " << *PtrA << " and " << *PtrB << "(SV: " << RootA.isSingleValued() << " Match: " << RootA.equals(RootB) << ")\n";
+
+    llvm::outs() << "Container block A: " << *ContainerBlockA << "\n";
+    llvm::outs() << "Container block B: " << *ContainerBlockB << "\n";
 
     llvm::outs() << "EWPT A:";
     debugPrintEWPTs(OutStateA);
     llvm::outs() << "\n";
     llvm::outs() << "EWPT B:";
     debugPrintEWPTs(OutStateB);
-    llvm::outs() << "\n";*/
+    llvm::outs() << "\n";
 
-    if(RootA.isSingleValued() && RootA.equals(RootB)) {
-        //llvm::outs() << "Returning MustAlias.\n";
-        return AliasAnalysis::MustAlias;
+    llvm::outs() << "RootA";
+    RootA.debugPrint(*this);
+    llvm::outs() << "RootB";
+    RootB.debugPrint(*this);
+#endif
+
+    EWPTEntry *SingleValueA = RootA.isSingleValued();
+    EWPTEntry *SingleValueB = RootB.isSingleValued();
+    if(SingleValueA && SingleValueB) {
+        if(SingleValueA->SourceLocation == SingleValueB->SourceLocation && isl_map_is_equal(SingleValueA->Mapping, SingleValueB->Mapping)) {
+#ifdef DEBUG_PRINT_ALIAS
+            llvm::outs() << "Returning MustAlias.\n";
+#endif
+            return AliasAnalysis::MustAlias;
+        }
     }
 
     // Intersect EWPTs at rank 0.
@@ -1077,10 +1177,14 @@ AliasAnalysis::AliasResult EWPTAliasAnalysis::alias(const Location& LocA, const 
     // If there's none, NoAlias. Otherwise, mayalias.
     bool FoundOneEntry = false;
     if(!Intersection.Entries.size()) {
-        //llvm::outs() << "Returning NoAlias.\n";
+#ifdef DEBUG_PRINT_ALIAS
+        llvm::outs() << "Returning NoAlias.\n";
+#endif
         return AliasAnalysis::NoAlias;
     } else {
-        //llvm::outs() << "Returning MayAlias.";
+#ifdef DEBUG_PRINT_ALIAS
+        llvm::outs() << "Returning MayAlias.";
+#endif
         return AliasAnalysis::alias(LocA, LocB);
     }
 }

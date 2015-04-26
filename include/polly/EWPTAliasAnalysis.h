@@ -92,9 +92,11 @@ public:
 
     bool equals(EWPTRoot& Other);
 
-    bool isSingleValued();
+    EWPTEntry *isSingleValued();
 
     std::vector<EWPTEntry*> getEntriesAtRank(unsigned Rank);
+
+    void debugPrint(EWPTAliasAnalysis& Analysis);
 };
 
 
