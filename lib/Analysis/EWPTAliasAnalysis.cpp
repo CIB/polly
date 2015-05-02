@@ -16,6 +16,7 @@
 #include <isl/space.h>
 #include <isl/local_space.h>
 #include <isl/val.h>
+#include <isl/aff.h>
 #include <isl/options.h>
 
 #include "polly/EWPTAliasAnalysis.h"
@@ -24,6 +25,8 @@
 #define DEBUG_PRINT_ALIAS 1
 
 using namespace llvm;
+
+namespace ewpt {
 
 // ============================
 // EWPTEntry
@@ -68,7 +71,7 @@ void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
 
     llvm::outs() << "Attempting to apply subscript " << *Subscript << " to "; this->debugPrint(Analysis); llvm::outs() << "\n";
 
-    bool HasConstantValue = false;
+    /*bool HasConstantValue = false;
     if(auto SubscriptUnknown = dyn_cast<SCEVUnknown>(Subscript)) {
         auto SubscriptValue = SubscriptUnknown->getValue();
         if(auto ConstSubscript = dyn_cast<llvm::ConstantInt>(SubscriptValue)) {
@@ -117,13 +120,21 @@ void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
         Mapping = isl_map_add_constraint(Mapping, NewConstraint);
 
         llvm::outs() << "mapping after adding constraint: " << Analysis.debugMappingToString(Mapping);
-    }
+    }*/
+
+    isl_pw_aff *SubscriptAff = SCEVAffinator::getPwAff(&Analysis, Subscript, Analysis.IslContext);
+    isl_set *SubscriptSet = isl_map_range(isl_map_from_pw_aff(SubscriptAff));
+    auto EmbedderMapping = Analysis.constructEmbedderMapping(1, Rank, 0);
+    SubscriptSet = isl_set_apply(SubscriptSet, EmbedderMapping);
+    llvm::outs() << "Subscript set: " << Analysis.debugSetToString(SubscriptSet) << "\n";
+    Analysis.mergeParams(SubscriptSet, Mapping);
+    Mapping = isl_map_intersect_domain(Mapping, SubscriptSet);
 
     // Project out the first input dimension.
     Mapping = isl_map_project_out(Mapping, isl_dim_in, 0, 1);
     Rank = Rank - 1;
 
-    //llvm::outs() << "After subscript application: "; this->debugPrint(Analysis); llvm::outs() << "\n";
+    llvm::outs() << "After subscript application: "; this->debugPrint(Analysis); llvm::outs() << "\n";
 }
 
 void EWPTEntry::debugPrint(EWPTAliasAnalysis &Analysis) {
@@ -682,6 +693,10 @@ void EWPTAliasAnalysis::debugPrintEWPTs(EWPTAliasAnalysisState& State) {
     }
 }
 
+isl_id *EWPTAliasAnalysis::getIslIdForValue(Value *val) {
+    return isl_id_alloc(IslContext, val->getName().str().c_str(), val);
+}
+
 std::string EWPTAliasAnalysis::debugSetToString(isl_set *Set) {
     auto Printer = isl_printer_to_str(IslContext);
     isl_printer_print_set(Printer, Set);
@@ -1175,7 +1190,6 @@ AliasAnalysis::AliasResult EWPTAliasAnalysis::alias(const Location& LocA, const 
 
     // Check how many elements there are in the intersection.
     // If there's none, NoAlias. Otherwise, mayalias.
-    bool FoundOneEntry = false;
     if(!Intersection.Entries.size()) {
 #ifdef DEBUG_PRINT_ALIAS
         llvm::outs() << "Returning NoAlias.\n";
@@ -1188,6 +1202,202 @@ AliasAnalysis::AliasResult EWPTAliasAnalysis::alias(const Location& LocA, const 
         return AliasAnalysis::alias(LocA, LocB);
     }
 }
+
+// SCEVAffinator
+// ====================================
+
+void SCEVAffinator::mergeParams(isl_pw_aff *&First, isl_pw_aff *&Second) {
+    auto Space = isl_pw_aff_get_space(First);
+    Second = isl_pw_aff_align_params(Second, Space);
+    Space = isl_pw_aff_get_space(Second);
+    First = isl_pw_aff_align_params(First, Space);
+}
+
+__isl_give isl_pw_aff *SCEVAffinator::getPwAff(EWPTAliasAnalysis *Analysis, const SCEV *Scev, isl_ctx *Ctx) {
+  // TODO: initialize parameter dimension
+  SCEVAffinator Affinator(Analysis);
+  Affinator.Ctx = Ctx;
+  return Affinator.visit(Scev);
+}
+
+__isl_give isl_val *isl_valFromAPInt(isl_ctx *Ctx, const APInt Int,
+                                            bool IsSigned) {
+  APInt Abs;
+  isl_val *v;
+
+  if (IsSigned)
+    Abs = Int.abs();
+  else
+    Abs = Int;
+
+  const uint64_t *Data = Abs.getRawData();
+  unsigned Words = Abs.getNumWords();
+
+  v = isl_val_int_from_chunks(Ctx, Words, sizeof(uint64_t), Data);
+
+  if (IsSigned && Int.isNegative())
+    v = isl_val_neg(v);
+
+  return v;
+}
+
+__isl_give isl_pw_aff *SCEVAffinator::visit(const SCEV *Expr) {
+  return SCEVVisitor<SCEVAffinator, isl_pw_aff *>::visit(Expr);
+}
+
+__isl_give isl_pw_aff *
+SCEVAffinator::visitTruncateExpr(const SCEVTruncateExpr *Expr) {
+    llvm_unreachable("SCEVTruncateExpr not yet supported");
+}
+
+__isl_give isl_pw_aff *
+SCEVAffinator::visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr) {
+    llvm_unreachable("SCEVZeroExtendExpr not yet supported");
+}
+
+__isl_give isl_pw_aff *SCEVAffinator::visitUDivExpr(const SCEVUDivExpr *Expr) {
+  llvm_unreachable("SCEVUDivExpr not yet supported");
+}
+
+__isl_give isl_pw_aff *
+SCEVAffinator::visitSignExtendExpr(const SCEVSignExtendExpr *Expr) {
+  // Assuming the value is signed, a sign extension is basically a noop.
+  // TODO: Reconsider this as soon as we support unsigned values.
+  return visit(Expr->getOperand());
+}
+
+isl_pw_aff *SCEVAffinator::visitConstant(const SCEVConstant *Expr) {
+    ConstantInt *Value = Expr->getValue();
+    isl_val *v;
+    // Assuming the value is signed should not lead to issues
+    // for subscript expressions in any reasonable C programs.
+    int MAX_SIGNED_INTEGER_32BIT = 1 << 30;
+    assert(Value->getValue().getSExtValue() < MAX_SIGNED_INTEGER_32BIT);
+    v = isl_valFromAPInt(Ctx, Value->getValue(), true);
+
+    isl_space *Space = isl_space_set_alloc(Ctx, 0, 0);
+    isl_local_space *ls = isl_local_space_from_space(Space);
+    return isl_pw_aff_from_aff(isl_aff_val_on_domain(ls, v));
+}
+
+__isl_give isl_pw_aff *SCEVAffinator::visitAddExpr(const SCEVAddExpr *Expr) {
+    isl_pw_aff *Sum = visit(Expr->getOperand(0));
+
+    for (int i = 1, e = Expr->getNumOperands(); i < e; ++i) {
+        isl_pw_aff *NextSummand = visit(Expr->getOperand(i));
+        mergeParams(Sum, NextSummand);
+        Sum = isl_pw_aff_add(Sum, NextSummand);
+    }
+
+    return Sum;
+}
+
+__isl_give isl_pw_aff *SCEVAffinator::visitMulExpr(const SCEVMulExpr *Expr) {
+    isl_pw_aff *Product = visit(Expr->getOperand(0));
+
+    for (int i = 1, e = Expr->getNumOperands(); i < e; ++i) {
+        isl_pw_aff *NextOperand = visit(Expr->getOperand(i));
+
+        if (!isl_pw_aff_is_cst(Product) && !isl_pw_aff_is_cst(NextOperand)) {
+          isl_pw_aff_free(Product);
+          isl_pw_aff_free(NextOperand);
+          return nullptr;
+        }
+
+        mergeParams(Product, NextOperand);
+        Product = isl_pw_aff_mul(Product, NextOperand);
+    }
+
+    return Product;
+}
+
+__isl_give isl_pw_aff *
+SCEVAffinator::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
+  assert(Expr->isAffine() && "Only affine AddRecurrences allowed");
+
+  // Directly generate isl_pw_aff for Expr if 'start' is zero.
+  if (Expr->getStart()->isZero()) {
+    isl_pw_aff *Start = visit(Expr->getStart());
+    isl_pw_aff *Step = visit(Expr->getOperand(1));
+    isl_space *Space = isl_space_set_alloc(Ctx, 0, 0);
+    isl_local_space *LocalSpace = isl_local_space_from_space(Space);
+
+    auto LoopIndex = Expr->getLoop()->getCanonicalInductionVariable();
+    auto LoopIndexId = Analysis->getIslIdForValue(LoopIndex);
+
+    Space = isl_space_set_alloc(Ctx, 1, 0);
+    isl_space_set_dim_id(Space, isl_dim_param, 0, LoopIndexId);
+    isl_local_space *ls = isl_local_space_from_space(Space);
+    isl_pw_aff *LPwAff = isl_pw_aff_var_on_domain(ls, isl_dim_param, 0);
+    mergeParams(Start, Step);
+    mergeParams(Start, LPwAff);
+
+    // TODO: Do we need to check for NSW and NUW?
+    return isl_pw_aff_add(Start, isl_pw_aff_mul(Step, LPwAff));
+  }
+
+  // Translate AddRecExpr from '{start, +, inc}' into 'start + {0, +, inc}'
+  // if 'start' is not zero.
+  ScalarEvolution *SE = Analysis->SE;
+  const SCEV *ZeroStartExpr = SE->getAddRecExpr(
+      SE->getConstant(Expr->getStart()->getType(), 0),
+      Expr->getStepRecurrence(*SE), Expr->getLoop(), SCEV::FlagAnyWrap);
+
+  isl_pw_aff *ZeroStartResult = visit(ZeroStartExpr);
+  isl_pw_aff *Start = visit(Expr->getStart());
+
+  mergeParams(ZeroStartResult, Start);
+  return isl_pw_aff_add(ZeroStartResult, Start);
+}
+
+__isl_give isl_pw_aff *SCEVAffinator::visitSMaxExpr(const SCEVSMaxExpr *Expr) {
+  isl_pw_aff *Max = visit(Expr->getOperand(0));
+
+  for (int i = 1, e = Expr->getNumOperands(); i < e; ++i) {
+    isl_pw_aff *NextOperand = visit(Expr->getOperand(i));
+    mergeParams(Max, NextOperand);
+    Max = isl_pw_aff_max(Max, NextOperand);
+  }
+
+  return Max;
+}
+
+__isl_give isl_pw_aff *SCEVAffinator::visitUMaxExpr(const SCEVUMaxExpr *Expr) {
+  llvm_unreachable("SCEVUMaxExpr not yet supported");
+}
+
+__isl_give isl_pw_aff *SCEVAffinator::visitSDivInstruction(Instruction *SDiv) {
+  assert(SDiv->getOpcode() == Instruction::SDiv && "Assumed SDiv instruction!");
+  auto *SE = Analysis->SE;
+
+  auto *Divisor = SDiv->getOperand(1);
+  auto *DivisorSCEV = SE->getSCEV(Divisor);
+  auto *DivisorPWA = visit(DivisorSCEV);
+  assert(isa<ConstantInt>(Divisor) &&
+         "SDiv is no parameter but has a non-constant RHS.");
+
+  auto *Dividend = SDiv->getOperand(0);
+  auto *DividendSCEV = SE->getSCEV(Dividend);
+  auto *DividendPWA = visit(DividendSCEV);
+  mergeParams(DividendPWA, DivisorPWA);
+  return isl_pw_aff_tdiv_q(DividendPWA, DivisorPWA);
+}
+
+__isl_give isl_pw_aff *SCEVAffinator::visitUnknown(const SCEVUnknown *Expr) {
+    auto UnknownValue = Expr->getValue();
+    auto UnknownId = Analysis->getIslIdForValue(UnknownValue);
+    isl_space *Space = isl_space_set_alloc(Ctx, 1, 0);
+    isl_space_set_dim_id(Space, isl_dim_param, 0, UnknownId);
+
+    isl_local_space *ls = isl_local_space_from_space(Space);
+    return isl_pw_aff_var_on_domain(ls, isl_dim_param, 0);
+}
+
+
+
+} // namespace ewpt
+
+using namespace ewpt;
 
 char EWPTAliasAnalysis::ID = 0;
 

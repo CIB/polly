@@ -2,8 +2,10 @@
 #define EWPT_ALIAS_ANALYSIS_H
 
 #include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "isl/options.h"
+#include "isl/aff.h"
 #include <queue>
 
 namespace llvm {
@@ -13,10 +15,49 @@ namespace llvm {
 
 using namespace llvm;
 
+
+namespace ewpt {
+
 // Forward declarations.
 class EWPTAliasAnalysis;
 class EWPTAliasAnalysisState;
 class EWPTAliasAnalysisFrame;
+
+/// Translate a 'const SCEV *' expression in an isl_pw_aff.
+struct SCEVAffinator : public SCEVVisitor<SCEVAffinator, isl_pw_aff *> {
+public:
+  /// @brief Translate a 'const SCEV *' to an isl_pw_aff.
+  ///
+  /// @param Stmt The location at which the scalar evolution expression
+  ///             is evaluated.
+  /// @param Expr The expression that is translated.
+  static __isl_give isl_pw_aff *getPwAff(EWPTAliasAnalysis* Analysis, const SCEV *Expr, isl_ctx *Ctx);
+
+  SCEVAffinator(EWPTAliasAnalysis *Analysis)
+    : Analysis(Analysis) { }
+
+private:
+  isl_ctx *Ctx;
+  int getLoopDepth(const Loop *L);
+  EWPTAliasAnalysis *Analysis;
+  void mergeParams(isl_pw_aff*& First, isl_pw_aff*& Second);
+
+  __isl_give isl_pw_aff *visit(const SCEV *Expr);
+  __isl_give isl_pw_aff *visitConstant(const SCEVConstant *Expr);
+  __isl_give isl_pw_aff *visitTruncateExpr(const SCEVTruncateExpr *Expr);
+  __isl_give isl_pw_aff *visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr);
+  __isl_give isl_pw_aff *visitSignExtendExpr(const SCEVSignExtendExpr *Expr);
+  __isl_give isl_pw_aff *visitAddExpr(const SCEVAddExpr *Expr);
+  __isl_give isl_pw_aff *visitMulExpr(const SCEVMulExpr *Expr);
+  __isl_give isl_pw_aff *visitUDivExpr(const SCEVUDivExpr *Expr);
+  __isl_give isl_pw_aff *visitAddRecExpr(const SCEVAddRecExpr *Expr);
+  __isl_give isl_pw_aff *visitSMaxExpr(const SCEVSMaxExpr *Expr);
+  __isl_give isl_pw_aff *visitUMaxExpr(const SCEVUMaxExpr *Expr);
+  __isl_give isl_pw_aff *visitUnknown(const SCEVUnknown *Expr);
+  __isl_give isl_pw_aff *visitSDivInstruction(Instruction *SDiv);
+
+  friend struct SCEVVisitor<SCEVAffinator, isl_pw_aff *>;
+};
 
 /**
  * An EWPT mapping entry of the form
@@ -152,6 +193,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         {
             initializeEWPTAliasAnalysisPass(*PassRegistry::getPassRegistry());
             IslContext = isl_ctx_alloc();
+            isl_options_set_on_error(IslContext, ISL_ON_ERROR_ABORT);
         }
 
         ~EWPTAliasAnalysis()
@@ -180,6 +222,8 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         std::string debugSetToString(isl_set *Set);
 
         std::string debugMappingToString(isl_map *Map);
+
+        __isl_give isl_id *getIslIdForValue(Value *val);
 
         void mergeParams(isl_map*& First, isl_map*& Second);
 
@@ -237,5 +281,6 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         AliasAnalysis::AliasResult alias(const Location& LocA, const Location& LocB);
 };
 
+} // namespace ewpt
 
 #endif // EWPT_ALIAS_ANALYSIS_H
