@@ -60,6 +60,61 @@ private:
 };
 
 /**
+ * The first (non-integer) part of a heap name.
+ */
+struct HeapNameId {
+    enum Type {
+        ZERO,
+        ANY,
+        MALLOC
+    };
+
+    Type hasType;
+    llvm::Value *SourceLocation;
+
+    static HeapNameId getMalloc(llvm::Value *SourceLocation) {
+        HeapNameId RetVal;
+        RetVal.hasType = MALLOC;
+        RetVal.SourceLocation = SourceLocation;
+        return RetVal;
+    }
+
+    static HeapNameId getAny() {
+        HeapNameId RetVal;
+        RetVal.hasType = ANY;
+        RetVal.SourceLocation = nullptr;
+        return RetVal;
+    }
+
+    static HeapNameId getZero() {
+        HeapNameId RetVal;
+        RetVal.hasType = ZERO;
+        RetVal.SourceLocation = nullptr;
+        return RetVal;
+    }
+
+    std::string toString() {
+        if(hasType == ZERO) {
+            return "NULL";
+        } else if(hasType == ANY) {
+            return "ANY";
+        } else {
+            std::string RetVal;
+            raw_string_ostream Stream(RetVal);
+            Stream << *SourceLocation;
+            RetVal = Stream.str();
+            return RetVal;
+        }
+    }
+};
+
+bool operator<(const HeapNameId& l, const HeapNameId& r );
+
+bool operator==(const HeapNameId& l, const HeapNameId& r );
+
+bool operator!=(const HeapNameId& l, const HeapNameId& r );
+
+/**
  * An EWPT mapping entry of the form
  * <N_s[a_1, ..., a_k], c>(x_1, ..., x_d), where s is the source
  * location of a heap object, a_i represent the iteration vector of
@@ -84,10 +139,7 @@ public:
      */
     unsigned AmountOfIterators;
 
-    /**
-     * The source location of the heap object mapped by this entry.
-     */
-    llvm::Value *SourceLocation;
+    HeapNameId HeapIdentifier;
 
     /**
      * Set of constraints over x_i, a_i and our free variables,
@@ -118,12 +170,12 @@ private:
 
 class EWPTRoot {
 public:
-    std::map< std::pair<unsigned, llvm::Value*>, EWPTEntry> Entries;
+    std::map< std::pair<unsigned, HeapNameId>, EWPTEntry> Entries;
 
     EWPTRoot ApplySubscript(EWPTAliasAnalysis& Analysis, const llvm::SCEV *Subscript,
                             EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State);
 
-    std::vector< std::pair<unsigned, llvm::Value*> > getCombinedKeys(EWPTRoot& Other);
+    std::vector< std::pair<unsigned, HeapNameId> > getCombinedKeys(EWPTRoot& Other);
 
     EWPTRoot merge(EWPTRoot& Other);
 
@@ -183,6 +235,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         //@{
         llvm::ScalarEvolution *SE;
         llvm::LoopInfo *LI;
+        const llvm::DataLayout *DL;
         //@}
 
         isl_ctx *IslContext;
@@ -258,17 +311,13 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
          * - We also carry over all the constraints for the subscripts of s
          * - We also add a constraint for x
          */
-        EWPTEntry generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, llvm::Value *BridgeValue);
+        EWPTEntry generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, const llvm::SCEV *BridgeValue);
 
-        /**
-         * Handle a heap assignment that involves a GEP, so something of the form
-         * p[x] = q, where the address p[x] is calculated through a GEP instruction.
-         */
-        bool handleGEPHeapAssignment(GetElementPtrInst *TargetGEP, llvm::Value *AssignedValue, EWPTAliasAnalysisState& State);
-
-        bool handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State);
+        bool handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State, EWPTAliasAnalysisFrame& Frame);
 
         bool handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State);
+
+        bool getEWPTForValue(EWPTAliasAnalysisState& State, llvm::Value *Key, EWPTRoot& RetVal);
 
         bool runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Frame, EWPTAliasAnalysisState& InState, EWPTAliasAnalysisState& RetValState);
 
