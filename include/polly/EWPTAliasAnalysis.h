@@ -34,12 +34,14 @@ public:
   static __isl_give isl_pw_aff *getPwAff(EWPTAliasAnalysis* Analysis, const SCEV *Expr, isl_ctx *Ctx);
 
   SCEVAffinator(EWPTAliasAnalysis *Analysis)
-    : Analysis(Analysis) { }
+    : Analysis(Analysis), Failed(false) { }
 
 private:
   isl_ctx *Ctx;
   int getLoopDepth(const Loop *L);
   EWPTAliasAnalysis *Analysis;
+  bool Failed;
+  std::string FailedReason;
   void mergeParams(isl_pw_aff*& First, isl_pw_aff*& Second);
 
   __isl_give isl_pw_aff *visit(const SCEV *Expr);
@@ -151,7 +153,7 @@ public:
      * Apply the given llvm::Value as subscript expression to the first
      * parameter x_1
      */
-    EWPTEntry ApplySubscript(EWPTAliasAnalysis& Analysis, const llvm::SCEV *Subscript, EWPTAliasAnalysisFrame& Frame, EWPTAliasAnalysisState& State) const;
+    bool ApplySubscript(EWPTAliasAnalysis& Analysis, const llvm::SCEV *Subscript, EWPTAliasAnalysisFrame& Frame, EWPTAliasAnalysisState& State, EWPTEntry& OutEntry) const;
 
     void debugPrint(EWPTAliasAnalysis& Analysis);
 
@@ -164,7 +166,7 @@ public:
     bool isSingleValued();
 
 private:
-    void InternalApplySubscript(EWPTAliasAnalysis& Analysis, const llvm::SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State);
+    bool InternalApplySubscript(EWPTAliasAnalysis& Analysis, const llvm::SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State);
 };
 
 
@@ -172,8 +174,8 @@ class EWPTRoot {
 public:
     std::map< std::pair<unsigned, HeapNameId>, EWPTEntry> Entries;
 
-    EWPTRoot ApplySubscript(EWPTAliasAnalysis& Analysis, const llvm::SCEV *Subscript,
-                            EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State);
+    bool ApplySubscript(EWPTAliasAnalysis& Analysis, const llvm::SCEV *Subscript,
+                            EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State, EWPTRoot& OutRoot);
 
     std::vector< std::pair<unsigned, HeapNameId> > getCombinedKeys(EWPTRoot& Other);
 
@@ -240,9 +242,12 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
         isl_ctx *IslContext;
 
+        // Did the function pass succeed?
+        bool Success;
+
         EWPTAliasAnalysisFrame Frame;
 
-        EWPTAliasAnalysis() : FunctionPass(ID)
+        EWPTAliasAnalysis() : FunctionPass(ID), Success(false)
         {
             initializeEWPTAliasAnalysisPass(*PassRegistry::getPassRegistry());
             IslContext = isl_ctx_alloc();
@@ -268,7 +273,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
         EWPTAliasAnalysisState MergeStates(std::vector<EWPTAliasAnalysisState*> StatesToMerge);
 
-        EWPTRoot MergeRoots(std::vector<EWPTRoot*> RootsToMerge);
+        EWPTRoot MergeRoots(std::vector<EWPTRoot> RootsToMerge);
 
         void debugPrintEWPTs(EWPTAliasAnalysisState& State);
 

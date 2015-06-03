@@ -62,6 +62,9 @@ EWPTEntry EWPTEntry::clone() {
 }
 
 EWPTEntry EWPTEntry::merge(EWPTEntry& Other) {
+    llvm::outs() << "Values: " << this->HeapIdentifier.toString() << " - " << Other.HeapIdentifier.toString() << "\n";
+    llvm::outs() << "Ranks: " << this->Rank << " - " << Other.Rank << "\n";
+    llvm::outs() << "Iters:" << this->AmountOfIterators << " - " << Other.AmountOfIterators << "\n";
     assert(Rank == Other.Rank && AmountOfIterators == Other.AmountOfIterators);
 
     EWPTEntry RetVal = *this;
@@ -82,19 +85,26 @@ EWPTEntry EWPTEntry::intersect(EWPTEntry& Other) {
 }
 
 
-EWPTEntry EWPTEntry::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV* Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) const {
+bool EWPTEntry::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV* Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State, EWPTEntry& OutEntry) const {
     EWPTEntry Copy = *this;
     Copy.Mapping = isl_map_copy(Mapping);
-    Copy.InternalApplySubscript(Analysis, Subscript, Frame, State);
-    return Copy;
+    if(Copy.InternalApplySubscript(Analysis, Subscript, Frame, State)) {
+        OutEntry = Copy;
+        return true;
+    } else {
+        return false;
+    }
 }
 
-void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
+bool EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
     // We need to substitute and project out the first parameter in the input dimension.
 
     llvm::outs() << "Attempting to apply subscript " << *Subscript << " to "; this->debugPrint(Analysis); llvm::outs() << "\n";
 
     isl_pw_aff *SubscriptAff = SCEVAffinator::getPwAff(&Analysis, Subscript, Analysis.IslContext);
+    if(!SubscriptAff) {
+        return false;
+    }
     isl_set *SubscriptSet = isl_map_range(isl_map_from_pw_aff(SubscriptAff));
 
     // Currently we have a set of the form POINTER_SIZE * i, we need to convert this to just i
@@ -115,6 +125,8 @@ void EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
     Rank = Rank - 1;
 
     llvm::outs() << "After subscript application: "; this->debugPrint(Analysis); llvm::outs() << "\n";
+
+    return true;
 }
 
 void EWPTEntry::debugPrint(EWPTAliasAnalysis &Analysis) {
@@ -133,17 +145,24 @@ bool EWPTEntry::isSingleValued() {
 // EWPTRoot
 // ==============================
 
-EWPTRoot EWPTRoot::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
+bool EWPTRoot::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State, EWPTRoot& OutRoot) {
     EWPTRoot RetVal;
     for(auto EntryPair : Entries) {
         auto NewKey = EntryPair.first;
         NewKey.first = NewKey.first - 1;
         auto& Entry = EntryPair.second;
         if(Entry.Rank > 0) {
-            RetVal.Entries[NewKey] = Entry.ApplySubscript(Analysis, Subscript, Frame, State);
+            EWPTEntry Result;
+            bool Success = Entry.ApplySubscript(Analysis, Subscript, Frame, State, Result);
+            if(Success) {
+                RetVal.Entries[NewKey] = Result;
+            } else {
+                return false;
+            }
         }
     }
-    return RetVal;
+    OutRoot = RetVal;
+    return true;
 }
 
 std::vector< std::pair<unsigned, HeapNameId> > EWPTRoot::getCombinedKeys(EWPTRoot& Other) {
@@ -306,6 +325,10 @@ std::vector<llvm::Value*> EWPTAliasAnalysisFrame::GetCurrentLoopIterators() {
 
 bool EWPTAliasAnalysis::runOnFunction(Function &F)
 {
+    // Clean up.
+    Frame = EWPTAliasAnalysisFrame();
+    Success = false;
+
     // Initialization.
     SE = &getAnalysis<ScalarEvolution>();
     LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
@@ -317,7 +340,9 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
     auto BeginBlock = &(F.getEntryBlock());
     Frame.BeginBlocks.insert(BeginBlock);
     Frame.RestrictToLoop = NULL;
-    iterativeControlFlowAnalysis(Frame);
+    if(iterativeControlFlowAnalysis(Frame)) {
+        this->Success = true;
+    }
 
     return false;
 }
@@ -357,28 +382,50 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
         BasicBlock *Current = Frame.BlocksToProcess.front();
         Frame.BlocksToProcess.pop();
 
+        llvm::outs() << "Predecessor states:\n";
+        for(auto State : getPredecessorStates(Frame, Current)) {
+            debugPrintEWPTs(*State);
+        }
         auto StartWithState = MergeStates(getPredecessorStates(Frame, Current));
-        runOnBlock(*Current, Frame, StartWithState, Frame.BlockOutStates[Current]);
+        if(!runOnBlock(*Current, Frame, StartWithState, Frame.BlockOutStates[Current])) {
+            return false;
+        }
 
         // Don't process the successors of an exit.
         if(Current == Frame.Exit) {
             continue;
         }
 
+        llvm::outs() << "LI->isLoopHeader(Current)" << LI->isLoopHeader(Current) << "\n";
+        llvm::outs() << "LI " << LI << "\n";
+        if(Frame.RestrictToLoop) {
+            llvm::outs() << "Loop: " << *Frame.RestrictToLoop;
+        }
+        llvm::outs() << *Current << "\n";
+        llvm::outs() << Current << "\n";
+
         if(LI->isLoopHeader(Current)) {
+            llvm::outs() << "Previously queued: " << Frame.BlocksToProcess.size() << "\n";
             Loop* LoopToAnalyze = LI->getLoopFor(Current);
             bool Success = handleLoop(Frame, *Current, *LoopToAnalyze, Frame.BlockOutStates[Current]);
             if(!Success) {
-                llvm::outs() << "Failed to handle loop\n";
+                llvm::errs() << "Failed to handle loop\n";
                 return false;
             }
+
+            llvm::outs() << "Currently queued: " << Frame.BlocksToProcess.size() << "\n";
+            if(Frame.BlocksToProcess.size()) {
+                llvm::outs() << *Frame.BlocksToProcess.front() << "\n";
+            }
+            llvm::outs() << "Pushing successors of loop header.\n";
 
             // Only add the successors that are not part of the loop.
             for(auto SI = succ_begin(Current), E = succ_end(Current); SI != E; SI++) {
                 // Check that this successor now has all requirements.
                 auto Successor = *SI;
-                // Only process the successor if it's actually within the current loop.
+                // Only process the successor if it's not within the current loop.
                 if(!LoopToAnalyze->contains(Successor)) {
+                    llvm::outs() << *Successor << "\n";
                     Frame.BlocksToProcess.push(Successor);
                 }
             }
@@ -387,16 +434,18 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
         } else if(!arePredecessorsProcessed(Frame, Current)) {
             llvm::outs() << "Trying to process block with unprocessed predecessors.";
             exit(1);
-        }
-
-        // Once this frame is done, try processing successors
-        for(auto SI = succ_begin(Current), E = succ_end(Current); SI != E; SI++) {
-            // Check that this successor now has all requirements.
-            auto Successor = *SI;
-            // Only process the successor if it's actually within the current loop.
-            if(!Frame.RestrictToLoop || Frame.RestrictToLoop->contains(Successor)) {
-                if(arePredecessorsProcessed(Frame, Successor) || LI->isLoopHeader(Successor)) {
-                    Frame.BlocksToProcess.push(Successor);
+        } else {
+            llvm::outs() << "Pushing successors of regular block.\n";
+            // Once this frame is done, try processing successors
+            for(auto SI = succ_begin(Current), E = succ_end(Current); SI != E; SI++) {
+                // Check that this successor now has all requirements.
+                auto Successor = *SI;
+                // Only process the successor if it's actually within the current loop.
+                if(!Frame.RestrictToLoop || Frame.RestrictToLoop->contains(Successor)) {
+                    if(arePredecessorsProcessed(Frame, Successor) || LI->isLoopHeader(Successor)) {
+                        llvm::outs() << *Successor << "\n";
+                        Frame.BlocksToProcess.push(Successor);
+                    }
                 }
             }
         }
@@ -428,14 +477,14 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
     // It must have a canonical induction variable, i.e. for(i = 0; i < n; i++)
     if(!LoopToAnalyze.getCanonicalInductionVariable()) {
-        llvm::outs() << "No canonical induction variable found for loop " << LoopToAnalyze << ", consider prepending the -indvars pass.\n";
-        exit(1);
+        llvm::errs() << "No canonical induction variable found for loop " << LoopToAnalyze << ", consider prepending the -indvars pass.\n";
+        return false;
     }
 
     // It must have exactly one back edge to the loop header.
     if(LoopToAnalyze.getNumBackEdges() != 1) {
         llvm::outs() << "Too many back edges for loop " << LoopToAnalyze << "\n";
-        exit(1);
+        return false;
     }
 
     llvm::outs() << "(loop) Entering loop " << LoopHeader.getName() << "\n";
@@ -564,16 +613,10 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
                 }
 
                 ExitState.trackedRoots[RootPair.first].Entries[EntryPair.first] = Entry;
-
-                //llvm::outs() << "Mapping after aging: "; Entry.debugPrint(*this); llvm::outs() << "\n";
             }
-            //llvm::outs() << "State after aging.\n";
-            //debugPrintEWPTs(ExitState);
         }
 
         if(ExitState.equals(EntryState)) {
-            //llvm::outs() << "We have reached a fixed point.\n";
-            //debugPrintEWPTs(ExitState);
             EntryState = ExitState;
             FixedPointReached = true;
             break;
@@ -613,13 +656,13 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
             }
         }
 
-        RetVal = EntryState;
         llvm::outs() << "(loop) Exiting loop " << LoopHeader.getName() << "\n";
+        RetVal = EntryState;
         return true;
     }
 
-    llvm::outs() << "Did not converge.\n";
-    exit(1);
+    llvm::errs() << "Did not converge.\n";
+    return false;
 }
 
 EWPTAliasAnalysisState EWPTAliasAnalysis::MergeStates(std::vector<EWPTAliasAnalysisState*> StatesToMerge) {
@@ -633,13 +676,13 @@ EWPTAliasAnalysisState EWPTAliasAnalysis::MergeStates(std::vector<EWPTAliasAnaly
     return RetVal;
 }
 
-EWPTRoot EWPTAliasAnalysis::MergeRoots(std::vector<EWPTRoot*> RootsToMerge) {
+EWPTRoot EWPTAliasAnalysis::MergeRoots(std::vector<EWPTRoot> RootsToMerge) {
     if(RootsToMerge.size() == 0) {
         return EWPTRoot();
     }
-    EWPTRoot RetVal = *(RootsToMerge[0]);
+    EWPTRoot RetVal = RootsToMerge[0];
     for(unsigned I = 1; I < RootsToMerge.size(); I++) {
-        RetVal = RetVal.merge(*(RootsToMerge[I]));
+        RetVal = RetVal.merge(RootsToMerge[I]);
     }
     return RetVal;
 }
@@ -860,15 +903,15 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
     auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
 
     if (!BasePointer) {
-        llvm::outs() << "Can not handle base pointer for " << *AssigningInstruction << "\n";
+        llvm::errs() << "Can not handle base pointer for " << *AssigningInstruction << "\n";
         return false;
     }
 
     auto BasePointerValue = BasePointer->getValue();
 
     if (isa<UndefValue>(BasePointerValue)) {
-        llvm::outs() << "Can not handle base value for " << *AssigningInstruction << "\n";
-        exit(1);
+        llvm::errs() << "Can not handle base value for " << *AssigningInstruction << "\n";
+        return false;
     }
 
     auto Offset = SE->getMinusSCEV(AccessFunction, BasePointer);
@@ -926,6 +969,14 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
 
                     for(auto TailMappingPair : AssignedMapping.Entries) {
                         auto& TailMapping = TailMappingPair.second;
+
+                        // If we would build an EWPT entry for p that ends again in p, abort.
+                        if(TailMapping.HeapIdentifier.hasType == HeapNameId::MALLOC &&
+                           TailMapping.HeapIdentifier.SourceLocation == RootPair.first) {
+                            llvm::errs() << "Cyclic heap memory graph detected, aborting.\n";
+                            return false;
+                        }
+
                         //llvm::outs() << "Found tail for " << *AssignedValue << ": "; TailMapping.debugPrint(*this); llvm::outs() << "\n"; llvm::outs().flush();
                         auto NewEntry = generateEntryFromHeapAssignment(PossibleAlias.Rank, EntranceConstraints, TailMapping, Offset);
                         auto KeyForNewEntry = std::make_pair(NewEntry.Rank, NewEntry.HeapIdentifier);
@@ -953,15 +1004,15 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
     auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
 
     if (!BasePointer) {
-        llvm::outs() << "Can not handle base pointer for " << *CurrentLoadInst << "\n";
-        exit(1);
+        llvm::errs() << "Can not handle base pointer for " << *CurrentLoadInst << "\n";
+        return false;
     }
 
     auto BaseValue = BasePointer->getValue();
 
     if (isa<UndefValue>(BaseValue)) {
-        llvm::outs() << "Can not handle base value for " << *CurrentLoadInst << "\n";
-        exit(1);
+        llvm::errs() << "Can not handle base value for " << *CurrentLoadInst << "\n";
+        return false;
     }
 
     auto Offset = SE->getMinusSCEV(AccessFunction, BasePointer);
@@ -971,10 +1022,11 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
         auto LoadedFrom = State.trackedRoots[BaseValue];
 
         // We're indexing into the loaded EWPT, so apply a subscript
-        EWPTRoot NewRoot = LoadedFrom.ApplySubscript(*this, Offset, Frame, State);
+        EWPTRoot NewRoot;
+        if(!LoadedFrom.ApplySubscript(*this, Offset, Frame, State, NewRoot)) {
+            return false;
+        }
         State.trackedRoots[CurrentLoadInst] = NewRoot;
-
-        //debugPrintEWPTs(State);
     }
 
     return true;
@@ -1053,11 +1105,33 @@ bool EWPTAliasAnalysis::runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Fr
             // incoming nodes. Note that the associated blocks must already have been
             // processed by the iterative algorithm.
 
-            std::vector<EWPTRoot*> RootsToMerge;
+            std::vector<EWPTRoot> RootsToMerge;
             for(unsigned I = 0; I < CurrentPhiNode->getNumIncomingValues(); I++) {
                 llvm::Value *IncomingValue = CurrentPhiNode->getIncomingValue(I);
-                EWPTRoot& Root = RetValState.trackedRoots[IncomingValue];
-                RootsToMerge.push_back(&Root);
+
+                if(llvm::Instruction *IncomingInstruction = dyn_cast<llvm::Instruction>(IncomingValue)) {
+                    // If we haven't processed the relevant block yet, skip it
+                    // (If all works correctly, the reason we haven't processed it yet is
+                    //  that we haven't iterated over a loop yet)
+                    if(!Frame.BlockOutStates.count(IncomingInstruction->getParent())) {
+                        continue;
+                    }
+                }
+                EWPTRoot Root;
+                bool Success = this->getEWPTForValue(RetValState, IncomingValue, Root);
+                if(!Success) {
+                    auto EmptySpace = isl_space_alloc(IslContext, 0, 0, 0);
+                    EWPTEntry Entry;
+                    Entry.HeapIdentifier = HeapNameId::getAny();
+                    Entry.AmountOfIterators = 0;
+                    Entry.Rank = 0;
+                    Entry.Mapping = isl_map_universe(EmptySpace);
+
+                    Root = EWPTRoot();
+                    auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getAny());
+                    Root.Entries[Key] = Entry;
+                }
+                RootsToMerge.push_back(Root);
             }
             EWPTRoot NewRoot = MergeRoots(RootsToMerge);
             RetValState.trackedRoots[&CurrentInstruction] = NewRoot;
@@ -1137,6 +1211,10 @@ bool instructionIsHandled(Instruction *Instr) {
 }
 
 AliasAnalysis::AliasResult EWPTAliasAnalysis::alias(const Location& LocA, const Location& LocB) {
+    if(!this->Success) {
+        return AliasAnalysis::alias(LocA, LocB);
+    }
+
     auto PtrA = (Instruction*) llvm::dyn_cast<Instruction>(LocA.Ptr->stripPointerCasts());
     auto PtrB = (Instruction*) llvm::dyn_cast<Instruction>(LocB.Ptr->stripPointerCasts());
 
@@ -1234,7 +1312,12 @@ __isl_give isl_pw_aff *SCEVAffinator::getPwAff(EWPTAliasAnalysis *Analysis, cons
   // TODO: initialize parameter dimension
   SCEVAffinator Affinator(Analysis);
   Affinator.Ctx = Ctx;
-  return Affinator.visit(Scev);
+  auto RetVal = Affinator.visit(Scev);
+  if(Affinator.Failed) {
+      return nullptr;
+  } else {
+      return RetVal;
+  }
 }
 
 __isl_give isl_val *isl_valFromAPInt(isl_ctx *Ctx, const APInt Int,
@@ -1264,16 +1347,22 @@ __isl_give isl_pw_aff *SCEVAffinator::visit(const SCEV *Expr) {
 
 __isl_give isl_pw_aff *
 SCEVAffinator::visitTruncateExpr(const SCEVTruncateExpr *Expr) {
-    llvm_unreachable("SCEVTruncateExpr not yet supported");
+    Failed = true;
+    FailedReason = "SCEVAffinator: SCEVTruncateExpr not yet supported";
+    return nullptr;
 }
 
 __isl_give isl_pw_aff *
 SCEVAffinator::visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr) {
-    llvm_unreachable("SCEVZeroExtendExpr not yet supported");
+    Failed = true;
+    FailedReason = "SCEVAffinator: SCEVZeroExtendExpr not yet supported";
+    return nullptr;
 }
 
 __isl_give isl_pw_aff *SCEVAffinator::visitUDivExpr(const SCEVUDivExpr *Expr) {
-  llvm_unreachable("SCEVUDivExpr not yet supported");
+    Failed = true;
+    FailedReason = "SCEVAffinator: SCEVUDivExpr not yet supported";
+    return nullptr;
 }
 
 __isl_give isl_pw_aff *
@@ -1318,6 +1407,10 @@ __isl_give isl_pw_aff *SCEVAffinator::visitMulExpr(const SCEVMulExpr *Expr) {
         if (!isl_pw_aff_is_cst(Product) && !isl_pw_aff_is_cst(NextOperand)) {
           isl_pw_aff_free(Product);
           isl_pw_aff_free(NextOperand);
+
+          Failed = true;
+          FailedReason = "SCEVAffinator: Expression isn't affine.";
+
           return nullptr;
         }
 
@@ -1330,7 +1423,11 @@ __isl_give isl_pw_aff *SCEVAffinator::visitMulExpr(const SCEVMulExpr *Expr) {
 
 __isl_give isl_pw_aff *
 SCEVAffinator::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
-  assert(Expr->isAffine() && "Only affine AddRecurrences allowed");
+  if(!Expr->isAffine()) {
+      Failed = true;
+      FailedReason = "SCEVAffinator: Only affine AddRecurrences allowed";
+      return nullptr;
+  }
 
   // Directly generate isl_pw_aff for Expr if 'start' is zero.
   if (Expr->getStart()->isZero()) {
@@ -1380,7 +1477,9 @@ __isl_give isl_pw_aff *SCEVAffinator::visitSMaxExpr(const SCEVSMaxExpr *Expr) {
 }
 
 __isl_give isl_pw_aff *SCEVAffinator::visitUMaxExpr(const SCEVUMaxExpr *Expr) {
-  llvm_unreachable("SCEVUMaxExpr not yet supported");
+    Failed = true;
+    FailedReason = "SCEVAffinator: SCEVUMaxExpr not yet supported";
+    return nullptr;
 }
 
 __isl_give isl_pw_aff *SCEVAffinator::visitSDivInstruction(Instruction *SDiv) {
@@ -1390,8 +1489,12 @@ __isl_give isl_pw_aff *SCEVAffinator::visitSDivInstruction(Instruction *SDiv) {
   auto *Divisor = SDiv->getOperand(1);
   auto *DivisorSCEV = SE->getSCEV(Divisor);
   auto *DivisorPWA = visit(DivisorSCEV);
-  assert(isa<ConstantInt>(Divisor) &&
-         "SDiv is no parameter but has a non-constant RHS.");
+
+  if(!isa<ConstantInt>(Divisor)) {
+      Failed = true;
+      FailedReason = "SCEVAffinator: RHS of division is non-constant.";
+      return nullptr;
+  }
 
   auto *Dividend = SDiv->getOperand(0);
   auto *DividendSCEV = SE->getSCEV(Dividend);
