@@ -327,7 +327,6 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
 {
     // Clean up.
     Frame = EWPTAliasAnalysisFrame();
-    Success = false;
 
     // Initialization.
     SE = &getAnalysis<ScalarEvolution>();
@@ -340,8 +339,8 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
     auto BeginBlock = &(F.getEntryBlock());
     Frame.BeginBlocks.insert(BeginBlock);
     Frame.RestrictToLoop = NULL;
-    if(iterativeControlFlowAnalysis(Frame)) {
-        this->Success = true;
+    if(!iterativeControlFlowAnalysis(Frame)) {
+        Frame.BlockOutStates.clear();
     }
 
     return false;
@@ -809,7 +808,7 @@ isl_set *EWPTAliasAnalysis::generateAliasConstraints(EWPTEntry& LeftHand, EWPTEn
  * - We also carry over all the constraints for the subscripts of s
  * - We also add a constraint for x
  */
-EWPTEntry EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, const llvm::SCEV *BridgeValue) {
+bool EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, const llvm::SCEV *BridgeValue, EWPTEntry& RetVal) {
     //llvm::outs() << "Generate Heap Assignment:: EntranceDepth = " << EntranceDepth << ", EntranceConstraints = " << debugSetToString(EntranceConstraints) << ", AssigneeMapping = " << debugMappingToString(AssigneeMapping.Mapping) << ", BridgeValue = " << *BridgeValue << "\n";
 
     // The new mapping will have the following subscripts:
@@ -840,6 +839,9 @@ EWPTEntry EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, 
     // Next we add a bridge constraint to our mapping. The bridge constraint is the constraint for
     // 'x' in the expression p[x] = q
     isl_pw_aff *SubscriptAff = SCEVAffinator::getPwAff(this, BridgeValue, IslContext);
+    if(!SubscriptAff) {
+        return false;
+    }
     isl_set *SubscriptSet = isl_map_range(isl_map_from_pw_aff(SubscriptAff));
 
     // Currently we have a set of the form POINTER_SIZE * i, we need to convert this to just i
@@ -880,15 +882,13 @@ EWPTEntry EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, 
     NewMapping = isl_map_intersect(NewMapping, EmbeddedAssigneeMapping);
 
     // Construct the EWPTEntry instance for the generated mapping.
-    EWPTEntry NewEntry;
-    NewEntry.AmountOfIterators = AssigneeMapping.AmountOfIterators;
-    NewEntry.HeapIdentifier = AssigneeMapping.HeapIdentifier;
-    NewEntry.Rank = InputSize;
-    NewEntry.Mapping = NewMapping;
+    RetVal = EWPTEntry();
+    RetVal.AmountOfIterators = AssigneeMapping.AmountOfIterators;
+    RetVal.HeapIdentifier = AssigneeMapping.HeapIdentifier;
+    RetVal.Rank = InputSize;
+    RetVal.Mapping = NewMapping;
 
     //llvm::outs() << "Result: " << debugMappingToString(NewMapping) << "\n";
-
-    return NewEntry;
 }
 
 bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State, EWPTAliasAnalysisFrame& Frame) {
@@ -978,7 +978,10 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                         }
 
                         //llvm::outs() << "Found tail for " << *AssignedValue << ": "; TailMapping.debugPrint(*this); llvm::outs() << "\n"; llvm::outs().flush();
-                        auto NewEntry = generateEntryFromHeapAssignment(PossibleAlias.Rank, EntranceConstraints, TailMapping, Offset);
+                        EWPTEntry NewEntry;
+                        if(!generateEntryFromHeapAssignment(PossibleAlias.Rank, EntranceConstraints, TailMapping, Offset, NewEntry)) {
+                            return false;
+                        }
                         auto KeyForNewEntry = std::make_pair(NewEntry.Rank, NewEntry.HeapIdentifier);
                         RootMapping.Entries[KeyForNewEntry] = NewEntry; // TODO: merge it with existing entry
                     }
@@ -1211,10 +1214,6 @@ bool instructionIsHandled(Instruction *Instr) {
 }
 
 AliasAnalysis::AliasResult EWPTAliasAnalysis::alias(const Location& LocA, const Location& LocB) {
-    if(!this->Success) {
-        return AliasAnalysis::alias(LocA, LocB);
-    }
-
     auto PtrA = (Instruction*) llvm::dyn_cast<Instruction>(LocA.Ptr->stripPointerCasts());
     auto PtrB = (Instruction*) llvm::dyn_cast<Instruction>(LocB.Ptr->stripPointerCasts());
 
@@ -1433,6 +1432,13 @@ SCEVAffinator::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
   if (Expr->getStart()->isZero()) {
     isl_pw_aff *Start = visit(Expr->getStart());
     isl_pw_aff *Step = visit(Expr->getOperand(1));
+
+    if(!isl_pw_aff_is_cst(Step)) {
+        Failed = true;
+        FailedReason = "Stride isn't constant.";
+        return nullptr;
+    }
+
     isl_space *Space = isl_space_set_alloc(Ctx, 0, 0);
     isl_local_space *LocalSpace = isl_local_space_from_space(Space);
 

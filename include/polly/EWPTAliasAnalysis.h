@@ -242,12 +242,9 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
         isl_ctx *IslContext;
 
-        // Did the function pass succeed?
-        bool Success;
-
         EWPTAliasAnalysisFrame Frame;
 
-        EWPTAliasAnalysis() : FunctionPass(ID), Success(false)
+        EWPTAliasAnalysis() : FunctionPass(ID)
         {
             initializeEWPTAliasAnalysisPass(*PassRegistry::getPassRegistry());
             IslContext = isl_ctx_alloc();
@@ -316,7 +313,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
          * - We also carry over all the constraints for the subscripts of s
          * - We also add a constraint for x
          */
-        EWPTEntry generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, const llvm::SCEV *BridgeValue);
+        bool generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, const llvm::SCEV *BridgeValue, EWPTEntry &RetVal);
 
         bool handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State, EWPTAliasAnalysisFrame& Frame);
 
