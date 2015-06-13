@@ -55,10 +55,20 @@ bool operator!=(const HeapNameId& l, const HeapNameId& r )
 // EWPTEntry
 // ============================
 
-EWPTEntry EWPTEntry::clone() {
-    EWPTEntry RetVal = *this;
-    RetVal.Mapping = isl_map_copy(Mapping);
-    return RetVal;
+EWPTEntry::~EWPTEntry() {
+    isl_map_free(Mapping);
+}
+
+EWPTEntry& EWPTEntry::operator=(const EWPTEntry& Other) {
+    this->Rank = Other.Rank;
+    this->AmountOfIterators = Other.AmountOfIterators;
+    this->HeapIdentifier = Other.HeapIdentifier;
+    if(Other.Mapping != NULL) {
+        this->Mapping = isl_map_copy(Other.Mapping);
+    } else {
+        this->Mapping = NULL;
+    }
+    return *this;
 }
 
 EWPTEntry EWPTEntry::merge(EWPTEntry& Other) {
@@ -214,14 +224,6 @@ EWPTRoot EWPTRoot::intersect(EWPTRoot& Other, unsigned Rank) {
     return RetVal;
 }
 
-EWPTRoot EWPTRoot::clone() {
-    EWPTRoot RetVal;
-    for(auto& EntryPair : Entries) {
-        RetVal.Entries[EntryPair.first] = EntryPair.second.clone();
-    }
-    return RetVal;
-}
-
 bool EWPTRoot::equals(EWPTRoot& Other) {
     auto AllKeys = getCombinedKeys(Other);
     for(auto& EntryKey : AllKeys) {
@@ -271,7 +273,7 @@ void EWPTRoot::debugPrint(EWPTAliasAnalysis &Analysis) {
 // ==================================
 
 EWPTAliasAnalysisState EWPTAliasAnalysisState::merge(EWPTAliasAnalysisState& Other) {
-    EWPTAliasAnalysisState RetVal = this->clone();
+    EWPTAliasAnalysisState RetVal = *this;
     for(auto TrackedRootEntry : Other.trackedRoots) {
         llvm::Value *Key = TrackedRootEntry.first;
         EWPTRoot& Value = TrackedRootEntry.second;
@@ -283,14 +285,6 @@ EWPTAliasAnalysisState EWPTAliasAnalysisState::merge(EWPTAliasAnalysisState& Oth
         }
     }
 
-    return RetVal;
-}
-
-EWPTAliasAnalysisState EWPTAliasAnalysisState::clone() {
-    EWPTAliasAnalysisState RetVal;
-    for(auto Pair : trackedRoots) {
-        RetVal.trackedRoots[Pair.first] = Pair.second.clone();
-    }
     return RetVal;
 }
 
@@ -325,6 +319,8 @@ std::vector<llvm::Value*> EWPTAliasAnalysisFrame::GetCurrentLoopIterators() {
 
 bool EWPTAliasAnalysis::runOnFunction(Function &F)
 {
+    llvm::outs() << "Runnoing on function " << F.getName() << "\n";
+
     // Clean up.
     Frame = EWPTAliasAnalysisFrame();
 
@@ -540,7 +536,7 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
             if(Pair.first != &LoopHeader) {
                 // Merge it into the super frame.
                 if(!SuperFrame.BlockOutStates.count(Pair.first)) {
-                    SuperFrame.BlockOutStates[Pair.first] = Pair.second.clone();
+                    SuperFrame.BlockOutStates[Pair.first] = Pair.second;
                 } else {
                     SuperFrame.BlockOutStates[Pair.first] = SuperFrame.BlockOutStates[Pair.first].merge(Pair.second);
                 }
@@ -889,6 +885,8 @@ bool EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, isl_s
     RetVal.Mapping = NewMapping;
 
     //llvm::outs() << "Result: " << debugMappingToString(NewMapping) << "\n";
+
+    return true;
 }
 
 bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State, EWPTAliasAnalysisFrame& Frame) {
@@ -1085,7 +1083,7 @@ bool EWPTAliasAnalysis::getEWPTForValue(EWPTAliasAnalysisState& State, Value *Po
 
 bool EWPTAliasAnalysis::runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Frame, EWPTAliasAnalysisState& InState, EWPTAliasAnalysisState& RetValState)
 {
-    RetValState = InState.clone();
+    RetValState = InState;
     for(Instruction &CurrentInstruction : block.getInstList()) {
         //llvm::outs() << "Handling instruction " << CurrentInstruction << "\n";
 
@@ -1440,7 +1438,6 @@ SCEVAffinator::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
     }
 
     isl_space *Space = isl_space_set_alloc(Ctx, 0, 0);
-    isl_local_space *LocalSpace = isl_local_space_from_space(Space);
 
     auto LoopIndex = Expr->getLoop()->getCanonicalInductionVariable();
     auto LoopIndexId = Analysis->getIslIdForValue(LoopIndex);

@@ -129,6 +129,8 @@ public:
         : Mapping(NULL)
     { }
 
+    ~EWPTEntry();
+
     /**
      * The amount of subscript parameters x_1, x_2, ..., x_d,
      * where d is the rank of this entry.
@@ -157,7 +159,7 @@ public:
 
     void debugPrint(EWPTAliasAnalysis& Analysis);
 
-    EWPTEntry clone();
+    EWPTEntry& operator=(const EWPTEntry& Other);
 
     EWPTEntry merge(EWPTEntry& Other);
 
@@ -183,8 +185,6 @@ public:
 
     EWPTRoot intersect(EWPTRoot& Other, unsigned Rank);
 
-    EWPTRoot clone();
-
     bool equals(EWPTRoot& Other);
 
     EWPTEntry *isSingleValued();
@@ -200,8 +200,6 @@ public:
     std::map<llvm::Value *, EWPTRoot> trackedRoots;
 
     EWPTAliasAnalysisState merge(EWPTAliasAnalysisState& Other);
-
-    EWPTAliasAnalysisState clone();
 
     bool equals(EWPTAliasAnalysisState& Other);
 };
