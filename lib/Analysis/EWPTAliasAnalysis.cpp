@@ -55,7 +55,12 @@ bool operator!=(const HeapNameId& l, const HeapNameId& r )
 // EWPTEntry
 // ============================
 
+EWPTEntry::EWPTEntry(const EWPTEntry& Other) {
+    *this = Other;
+}
+
 EWPTEntry::~EWPTEntry() {
+    printf("Freeing %x\n", Mapping);
     isl_map_free(Mapping);
 }
 
@@ -65,6 +70,7 @@ EWPTEntry& EWPTEntry::operator=(const EWPTEntry& Other) {
     this->HeapIdentifier = Other.HeapIdentifier;
     if(Other.Mapping != NULL) {
         this->Mapping = isl_map_copy(Other.Mapping);
+        printf("Copying %x\n", Mapping);
     } else {
         this->Mapping = NULL;
     }
@@ -80,6 +86,7 @@ EWPTEntry EWPTEntry::merge(EWPTEntry& Other) {
     EWPTEntry RetVal = *this;
     auto Mapping1 = isl_map_copy(Mapping);
     auto Mapping2 = isl_map_copy(Other.Mapping);
+    isl_map_free(RetVal.Mapping);
     RetVal.Mapping = isl_map_union(Mapping1, Mapping2);
     return RetVal;
 }
@@ -90,6 +97,7 @@ EWPTEntry EWPTEntry::intersect(EWPTEntry& Other) {
     EWPTEntry RetVal = *this;
     auto Mapping1 = isl_map_copy(Mapping);
     auto Mapping2 = isl_map_copy(Other.Mapping);
+    isl_map_free(RetVal.Mapping);
     RetVal.Mapping = isl_map_intersect(Mapping1, Mapping2);
     return RetVal;
 }
@@ -97,7 +105,6 @@ EWPTEntry EWPTEntry::intersect(EWPTEntry& Other) {
 
 bool EWPTEntry::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV* Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State, EWPTEntry& OutEntry) const {
     EWPTEntry Copy = *this;
-    Copy.Mapping = isl_map_copy(Mapping);
     if(Copy.InternalApplySubscript(Analysis, Subscript, Frame, State)) {
         OutEntry = Copy;
         return true;
@@ -157,7 +164,7 @@ bool EWPTEntry::isSingleValued() {
 
 bool EWPTRoot::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State, EWPTRoot& OutRoot) {
     EWPTRoot RetVal;
-    for(auto EntryPair : Entries) {
+    for(auto& EntryPair : Entries) {
         auto NewKey = EntryPair.first;
         NewKey.first = NewKey.first - 1;
         auto& Entry = EntryPair.second;
@@ -177,10 +184,10 @@ bool EWPTRoot::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript
 
 std::vector< std::pair<unsigned, HeapNameId> > EWPTRoot::getCombinedKeys(EWPTRoot& Other) {
     std::vector< std::pair<unsigned, HeapNameId> > AllKeys;
-    for(auto EntryPair : Entries) {
+    for(auto& EntryPair : Entries) {
         AllKeys.push_back(EntryPair.first);
     }
-    for(auto EntryPair : Other.Entries) {
+    for(auto& EntryPair : Other.Entries) {
         AllKeys.push_back(EntryPair.first);
     }
     return AllKeys;
@@ -261,7 +268,7 @@ EWPTEntry *EWPTRoot::isSingleValued() {
 
 void EWPTRoot::debugPrint(EWPTAliasAnalysis &Analysis) {
     llvm::outs() << "{\n";
-    for(auto EntryPair : Entries) {
+    for(auto& EntryPair : Entries) {
         auto& Entry = EntryPair.second;
         llvm::outs() << "    (" << Entry.HeapIdentifier.toString() << ", " << Entry.Rank << ":" << EntryPair.first.first << ")\t->\t" << Analysis.debugMappingToString(Entry.Mapping) << "\n";
     }
@@ -289,7 +296,7 @@ EWPTAliasAnalysisState EWPTAliasAnalysisState::merge(EWPTAliasAnalysisState& Oth
 }
 
 bool EWPTAliasAnalysisState::equals(EWPTAliasAnalysisState& Other) {
-    for(auto Pair : trackedRoots) {
+    for(auto& Pair : trackedRoots) {
         auto Entry = Pair.second;
         auto OtherEntry = Other.trackedRoots[Pair.first];
 
@@ -303,6 +310,7 @@ bool EWPTAliasAnalysisState::equals(EWPTAliasAnalysisState& Other) {
 // =======================================
 // EWPTAliasAnalysisFrame
 // =======================================
+
 std::vector<llvm::Value*> EWPTAliasAnalysisFrame::GetCurrentLoopIterators() {
     std::vector<llvm::Value*> RetVal;
     EWPTAliasAnalysisFrame *Current = this;
@@ -529,7 +537,7 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
         // Before aging and binding, we need to propagate all the states of the
         // loop body blocks to the super frame.
-        for(auto Pair : SubFrame.BlockOutStates) {
+        for(auto& Pair : SubFrame.BlockOutStates) {
             if(!LoopToAnalyze.contains(Pair.first)) {
                 continue;
             }
@@ -552,9 +560,9 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         // Replace "i" by "i-" for the state of the loop header
         // Add a new "i"
         // Project out "i-"
-        for(auto RootPair : ExitState.trackedRoots) {
+        for(auto& RootPair : ExitState.trackedRoots) {
             auto& PointsToMapping = RootPair.second;
-            for(auto EntryPair : PointsToMapping.Entries) {
+            for(auto& EntryPair : PointsToMapping.Entries) {
                 auto& Entry = EntryPair.second;
                 //llvm::outs() << "Mapping before aging: "; Entry.debugPrint(*this); llvm::outs() << "\n";
 
@@ -594,8 +602,9 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
                 // Project out parameter dimensions that aren't constant, unless they're the iterator.
                 for(unsigned i = 0; i < isl_space_dim(isl_map_get_space(Entry.Mapping), isl_dim_param); i++) {
                     auto DimIdentifier = isl_space_get_dim_id(isl_map_get_space(Entry.Mapping), isl_dim_param, i);
-
                     llvm::Value *Variable = (llvm::Value*) isl_id_get_user(DimIdentifier);
+                    isl_id_free(DimIdentifier);
+
                     // Check if it's constant
                     if(Variable == InductionVariable) {
                         continue;
@@ -628,9 +637,9 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
         // i must be <= UpperBound
 
-        for(auto RootPair : EntryState.trackedRoots) {
+        for(auto& RootPair : EntryState.trackedRoots) {
             auto& PointsToMapping = RootPair.second;
-            for(auto EntryPair : PointsToMapping.Entries) {
+            for(auto& EntryPair : PointsToMapping.Entries) {
                 auto& Entry = EntryPair.second;
                 auto Model = isl_space_params_alloc(IslContext, 2);
                 auto Identifier = isl_id_alloc(IslContext, IVName.c_str(), InductionVariable);
@@ -684,7 +693,7 @@ EWPTRoot EWPTAliasAnalysis::MergeRoots(std::vector<EWPTRoot> RootsToMerge) {
 
 void EWPTAliasAnalysis::debugPrintEWPTs(EWPTAliasAnalysisState& State) {
     llvm::outs() << "EWPTs:\n";
-    for(auto Pair : State.trackedRoots) {
+    for(auto& Pair : State.trackedRoots) {
         if(Pair.second.Entries.size() == 0) {
             continue;
         }
@@ -821,11 +830,11 @@ bool EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, isl_s
     // First we need to convert our set of constraints for the entrance mapping into a set of constraints
     // for the larger space of the new mapping. For this, we create an embedder mapping, which is just
     // an identity function from the smaller space into the larger space.
-    auto AliasSetSize = isl_space_dim(isl_set_get_space(EntranceConstraints), isl_dim_set);
+    auto AliasSetSize = isl_set_dim(EntranceConstraints, isl_dim_set);
     auto EmbedderMapping = constructEmbedderMapping(AliasSetSize, InputSize);
 
     mergeParams(EntranceConstraints, EmbedderMapping);
-    auto FilterSpace = isl_set_apply(isl_set_copy(EntranceConstraints), EmbedderMapping);
+    auto FilterSpace = isl_set_apply(EntranceConstraints, EmbedderMapping);
 
     // Now we intersect our constraints for (x_1, ..., x_d) with the mapping, effectively adding these
     // constraints to the mapping we're generating.
@@ -924,7 +933,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
     if(!State.trackedRoots.count(BasePointerValue)) {
         return false; // TODO: error handling
     }
-    for(auto EntryPair : State.trackedRoots[BasePointerValue].Entries) {
+    for(auto& EntryPair : State.trackedRoots[BasePointerValue].Entries) {
         auto& Entry = EntryPair.second;
         if(Entry.Rank == 0) {
             //llvm::outs() << "Found entry of depth 0 " << *(Entry.SourceLocation) << "\n";
@@ -954,7 +963,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
 
             // Make a copy of the entries, as we may modify them.
             auto Entries = RootMapping.Entries;
-            for(auto PossibleAliasPair : Entries) {
+            for(auto& PossibleAliasPair : Entries) {
                 auto& PossibleAlias = PossibleAliasPair.second;
                 if(PossibleAlias.HeapIdentifier == ModifiedHeapObject.HeapIdentifier) {
                     auto EntranceConstraints = generateAliasConstraints(PossibleAlias, ModifiedHeapObject);
@@ -965,7 +974,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                     // Now build new mappings from our set for aliasing x_1, ..., x_d, the
                     // transition subscript x_{d+1} = x, and each EWPT in q
 
-                    for(auto TailMappingPair : AssignedMapping.Entries) {
+                    for(auto& TailMappingPair : AssignedMapping.Entries) {
                         auto& TailMapping = TailMappingPair.second;
 
                         // If we would build an EWPT entry for p that ends again in p, abort.
@@ -1170,9 +1179,13 @@ bool EWPTAliasAnalysis::runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Fr
                 Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
             }
 
+            isl_space_free(Space);
+
             auto KeyForNewEntry = std::make_pair(Entry.Rank, Entry.HeapIdentifier);
             Root.Entries[KeyForNewEntry] = Entry;
             RetValState.trackedRoots[&CurrentInstruction] = Root;
+
+            printf("Root %x Entry %x\n", Root.Entries[KeyForNewEntry].Mapping, Entry.Mapping);
 
             //llvm::outs() << "Added new 0 depth entry for " << CurrentInstruction << "\n";
             //llvm::outs() << "New constraints: " << debugMappingToString(Entry.Mapping) << "\n";

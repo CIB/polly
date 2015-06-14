@@ -129,6 +129,8 @@ public:
         : Mapping(NULL)
     { }
 
+    EWPTEntry(const EWPTEntry& Other);
+
     ~EWPTEntry();
 
     /**
