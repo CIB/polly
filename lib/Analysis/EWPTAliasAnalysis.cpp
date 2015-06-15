@@ -1445,6 +1445,9 @@ SCEVAffinator::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
     isl_pw_aff *Step = visit(Expr->getOperand(1));
 
     if(!isl_pw_aff_is_cst(Step)) {
+        isl_pw_aff_free(Start);
+        isl_pw_aff_free(Step);
+
         Failed = true;
         FailedReason = "Stride isn't constant.";
         return nullptr;
@@ -1503,14 +1506,15 @@ __isl_give isl_pw_aff *SCEVAffinator::visitSDivInstruction(Instruction *SDiv) {
   auto *SE = Analysis->SE;
 
   auto *Divisor = SDiv->getOperand(1);
-  auto *DivisorSCEV = SE->getSCEV(Divisor);
-  auto *DivisorPWA = visit(DivisorSCEV);
 
   if(!isa<ConstantInt>(Divisor)) {
       Failed = true;
       FailedReason = "SCEVAffinator: RHS of division is non-constant.";
       return nullptr;
   }
+
+  auto *DivisorSCEV = SE->getSCEV(Divisor);
+  auto *DivisorPWA = visit(DivisorSCEV);
 
   auto *Dividend = SDiv->getOperand(0);
   auto *DividendSCEV = SE->getSCEV(Dividend);

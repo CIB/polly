@@ -248,11 +248,13 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         {
             initializeEWPTAliasAnalysisPass(*PassRegistry::getPassRegistry());
             IslContext = isl_ctx_alloc();
-            isl_options_set_on_error(IslContext, ISL_ON_ERROR_ABORT);
+            isl_options_set_on_error(IslContext, ISL_ON_ERROR_WARN);
         }
 
         ~EWPTAliasAnalysis()
         {
+            Frame.BlockOutStates.clear();
+            Frame.EntryState.trackedRoots.clear();
             isl_ctx_free(IslContext);
         }
 
