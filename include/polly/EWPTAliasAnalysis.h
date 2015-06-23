@@ -126,7 +126,7 @@ bool operator!=(const HeapNameId& l, const HeapNameId& r );
 class EWPTEntry {
 public:
     EWPTEntry()
-        : Mapping(NULL)
+        : Mapping(nullptr)
     { }
 
     EWPTEntry(const EWPTEntry& Other);

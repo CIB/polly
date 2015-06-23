@@ -1,12 +1,14 @@
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/LoopInfo.h"
-#include "llvm/Pass.h"
 #include "llvm/Analysis/RegionInfo.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/Pass.h"
 
 #include <isl/flow.h>
 #include <isl/constraint.h>
@@ -26,6 +28,16 @@
 #define DEBUG_PRINT_ALIAS 1
 
 using namespace llvm;
+
+#define DEBUG_TYPE "ewpt"
+STATISTIC(NoCanonicalInductionVariable, "EWPT Analysis Error: No canonical induction variable for loop");
+STATISTIC(TooManyLoopBackEdges, "EWPT Analysis Error: Too many loop back edges");
+STATISTIC(LoopDidNotConverge, "EWPT Analysis Error: Loop did not converge");
+STATISTIC(AddressNotPointerAligned, "EWPT Analysis Error: Accessing an address that isn't pointer aligned");
+STATISTIC(NoScevForBasePointer, "EWPT Analysis Error: Could not convert base pointer for store to known SCEV");
+STATISTIC(WriteToAny, "EWPT Analysis Error: Potential write to ANY heap object");
+STATISTIC(CyclicHeapMemoryGraph, "EWPT Analysis Error: Heap memory graph has potential cycles");
+STATISTIC(CouldNotAffinateSCEV, "EWPT Analysis Error: SCEVAffinator failed on SCEV");
 
 namespace ewpt {
 
@@ -56,11 +68,12 @@ bool operator!=(const HeapNameId& l, const HeapNameId& r )
 // ============================
 
 EWPTEntry::EWPTEntry(const EWPTEntry& Other) {
+    Mapping = nullptr;
     *this = Other;
 }
 
 EWPTEntry::~EWPTEntry() {
-    printf("Freeing %x\n", Mapping);
+    //printf("Freeing %x\n", Mapping);
     isl_map_free(Mapping);
 }
 
@@ -68,11 +81,18 @@ EWPTEntry& EWPTEntry::operator=(const EWPTEntry& Other) {
     this->Rank = Other.Rank;
     this->AmountOfIterators = Other.AmountOfIterators;
     this->HeapIdentifier = Other.HeapIdentifier;
-    if(Other.Mapping != NULL) {
-        this->Mapping = isl_map_copy(Other.Mapping);
-        printf("Copying %x\n", Mapping);
-    } else {
-        this->Mapping = NULL;
+
+    if(this->Mapping != Other.Mapping) {
+        if(this->Mapping != NULL) {
+            isl_map_free(this->Mapping);
+        }
+
+        if(Other.Mapping != NULL) {
+            this->Mapping = isl_map_copy(Other.Mapping);
+            //printf("Copying %x\n", Mapping);
+        } else {
+            this->Mapping = NULL;
+        }
     }
     return *this;
 }
@@ -335,9 +355,9 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
     // Initialization.
     SE = &getAnalysis<ScalarEvolution>();
     LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-    DL = &getAnalysis<DataLayoutPass>().getDataLayout();
+    DL = &(F.getParent()->getDataLayout());
 
-    InitializeAliasAnalysis(this);
+    InitializeAliasAnalysis(this, DL);
 
     // The actual analysis.
     auto BeginBlock = &(F.getEntryBlock());
@@ -480,13 +500,15 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
     // It must have a canonical induction variable, i.e. for(i = 0; i < n; i++)
     if(!LoopToAnalyze.getCanonicalInductionVariable()) {
+        ++NoCanonicalInductionVariable;
         llvm::errs() << "No canonical induction variable found for loop " << LoopToAnalyze << ", consider prepending the -indvars pass.\n";
         return false;
     }
 
     // It must have exactly one back edge to the loop header.
     if(LoopToAnalyze.getNumBackEdges() != 1) {
-        llvm::outs() << "Too many back edges for loop " << LoopToAnalyze << "\n";
+        ++TooManyLoopBackEdges;
+        llvm::errs() << "Too many back edges for loop " << LoopToAnalyze << "\n";
         return false;
     }
 
@@ -665,6 +687,7 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         return true;
     }
 
+    ++LoopDidNotConverge;
     llvm::errs() << "Did not converge.\n";
     return false;
 }
@@ -901,6 +924,7 @@ bool EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, isl_s
 bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State, EWPTAliasAnalysisFrame& Frame) {
     // Make sure we're storing to an aligned position and something of pointer size.
     if(AssigningInstruction->getAlignment() != DL->getPointerSize()) {
+        AddressNotPointerAligned++;
         llvm::errs() << "Storing to an address that isn't pointer aligned.\n";
         return false;
     }
@@ -910,6 +934,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
     auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
 
     if (!BasePointer) {
+        NoScevForBasePointer++;
         llvm::errs() << "Can not handle base pointer for " << *AssigningInstruction << "\n";
         return false;
     }
@@ -917,6 +942,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
     auto BasePointerValue = BasePointer->getValue();
 
     if (isa<UndefValue>(BasePointerValue)) {
+        NoScevForBasePointer++;
         llvm::errs() << "Can not handle base value for " << *AssigningInstruction << "\n";
         return false;
     }
@@ -954,6 +980,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
         }
         if(ModifiedHeapObject.HeapIdentifier.hasType == HeapNameId::ANY) {
             // We're assigning to ANY. Abort the analysis.
+            WriteToAny++;
             llvm::errs() << "Aborting analysis because of potential write to ANY.\n";
             return false;
         }
@@ -980,6 +1007,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                         // If we would build an EWPT entry for p that ends again in p, abort.
                         if(TailMapping.HeapIdentifier.hasType == HeapNameId::MALLOC &&
                            TailMapping.HeapIdentifier.SourceLocation == RootPair.first) {
+                            CyclicHeapMemoryGraph++;
                             llvm::errs() << "Cyclic heap memory graph detected, aborting.\n";
                             return false;
                         }
@@ -1005,6 +1033,7 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
 
     // Make sure the alignment is a multiple of pointer size.
     if(CurrentLoadInst->getAlignment() % DL->getPointerSize() != 0) {
+        AddressNotPointerAligned++;
         llvm::errs() << "Load with alignment (" << CurrentLoadInst->getAlignment() <<
                         ") that's not a multiple of pointer size (" << DL->getPointerSize() << ")\n";
         return false;
@@ -1014,6 +1043,7 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
     auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
 
     if (!BasePointer) {
+        NoScevForBasePointer++;
         llvm::errs() << "Can not handle base pointer for " << *CurrentLoadInst << "\n";
         return false;
     }
@@ -1021,6 +1051,7 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
     auto BaseValue = BasePointer->getValue();
 
     if (isa<UndefValue>(BaseValue)) {
+        NoScevForBasePointer++;
         llvm::errs() << "Can not handle base value for " << *CurrentLoadInst << "\n";
         return false;
     }
@@ -1185,7 +1216,7 @@ bool EWPTAliasAnalysis::runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Fr
             Root.Entries[KeyForNewEntry] = Entry;
             RetValState.trackedRoots[&CurrentInstruction] = Root;
 
-            printf("Root %x Entry %x\n", Root.Entries[KeyForNewEntry].Mapping, Entry.Mapping);
+            //printf("Root %x Entry %x\n", Root.Entries[KeyForNewEntry].Mapping, Entry.Mapping);
 
             //llvm::outs() << "Added new 0 depth entry for " << CurrentInstruction << "\n";
             //llvm::outs() << "New constraints: " << debugMappingToString(Entry.Mapping) << "\n";
@@ -1202,7 +1233,6 @@ void EWPTAliasAnalysis::getAnalysisUsage(AnalysisUsage &AU) const
 {
     AliasAnalysis::getAnalysisUsage(AU);
     AU.addRequired<AliasAnalysis>();
-    AU.addRequired<DataLayoutPass>();
     AU.addRequired<LoopInfoWrapperPass>();
     AU.addRequired<ScalarEvolution>();
     AU.setPreservesAll();
@@ -1324,6 +1354,7 @@ __isl_give isl_pw_aff *SCEVAffinator::getPwAff(EWPTAliasAnalysis *Analysis, cons
   Affinator.Ctx = Ctx;
   auto RetVal = Affinator.visit(Scev);
   if(Affinator.Failed) {
+      CouldNotAffinateSCEV++;
       return nullptr;
   } else {
       return RetVal;
