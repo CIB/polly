@@ -331,7 +331,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
         isl_ctx *getIslContext();
 
-        AliasAnalysis::AliasResult alias(const Location& LocA, const Location& LocB);
+        AliasResult alias(const MemoryLocation& LocA, const MemoryLocation& LocB);
 };
 
 } // namespace ewpt

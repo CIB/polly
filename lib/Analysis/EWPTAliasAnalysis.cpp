@@ -1254,7 +1254,7 @@ bool instructionIsHandled(Instruction *Instr) {
     return llvm::dyn_cast<llvm::LoadInst>(Instr) || llvm::dyn_cast<llvm::StoreInst>(Instr) || llvm::dyn_cast<llvm::PHINode>(Instr) || llvm::isNoAliasCall(Instr);
 }
 
-AliasAnalysis::AliasResult EWPTAliasAnalysis::alias(const Location& LocA, const Location& LocB) {
+AliasResult EWPTAliasAnalysis::alias(const MemoryLocation& LocA, const MemoryLocation& LocB) {
     auto PtrA = (Instruction*) llvm::dyn_cast<Instruction>(LocA.Ptr->stripPointerCasts());
     auto PtrB = (Instruction*) llvm::dyn_cast<Instruction>(LocB.Ptr->stripPointerCasts());
 
@@ -1316,7 +1316,7 @@ AliasAnalysis::AliasResult EWPTAliasAnalysis::alias(const Location& LocA, const 
 #ifdef DEBUG_PRINT_ALIAS
             llvm::outs() << "Returning MustAlias.\n";
 #endif
-            return AliasAnalysis::MustAlias;
+            return MustAlias;
         }
     }
 
@@ -1329,7 +1329,7 @@ AliasAnalysis::AliasResult EWPTAliasAnalysis::alias(const Location& LocA, const 
 #ifdef DEBUG_PRINT_ALIAS
         llvm::outs() << "Returning NoAlias.\n";
 #endif
-        return AliasAnalysis::NoAlias;
+        return NoAlias;
     } else {
 #ifdef DEBUG_PRINT_ALIAS
         llvm::outs() << "Returning MayAlias.";
