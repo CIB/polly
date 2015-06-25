@@ -187,6 +187,10 @@ void initializePollyPasses(PassRegistry &Registry) {
 ///
 /// Polly supports the isl internal code generator.
 void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
+
+
+  PM.add(new ewpt::EWPTAliasAnalysis());
+
   PM.add(polly::createScopDetectionPass());
 
   if (PollyDetectOnly)
