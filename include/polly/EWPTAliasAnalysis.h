@@ -266,7 +266,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
 
         bool iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Frame);
 
-        llvm::Value *getUpperBoundForLoop(Loop& LoopToAnalyze);
+        bool getUpperBoundForLoop(Loop& LoopToAnalyze, llvm::Value*& RetVal);
 
         bool handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBlock& LoopHeader, Loop& LoopToAnalyze, EWPTAliasAnalysisState& RetVal);
 

@@ -456,7 +456,7 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
             continue;
         } else if(!arePredecessorsProcessed(Frame, Current)) {
             llvm::outs() << "Trying to process block with unprocessed predecessors.";
-            exit(1);
+            return false;
         } else {
             llvm::outs() << "Pushing successors of regular block.\n";
             // Once this frame is done, try processing successors
@@ -477,7 +477,7 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
     return true;
 }
 
-llvm::Value *EWPTAliasAnalysis::getUpperBoundForLoop(Loop& LoopToAnalyze) {
+bool EWPTAliasAnalysis::getUpperBoundForLoop(Loop& LoopToAnalyze, Value *&RetVal) {
     BasicBlock* LoopHeader = LoopToAnalyze.getHeader();
     for(auto& Instruction : LoopHeader->getInstList()) {
         //llvm::outs() << "Checking " << Instruction << "\n";
@@ -486,13 +486,14 @@ llvm::Value *EWPTAliasAnalysis::getUpperBoundForLoop(Loop& LoopToAnalyze) {
                 Comparison->getOperand(0) == LoopToAnalyze.getCanonicalInductionVariable() &&
                 Comparison->isFalseWhenEqual()
             ) {
-                return Comparison->getOperand(1);
+                RetVal = Comparison->getOperand(1);
+                return true;
             }
         }
     }
 
     llvm::outs() << "No upper bound found for loop.\n";
-    exit(1);
+    return false;
 }
 
 bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBlock& LoopHeader, Loop& LoopToAnalyze, EWPTAliasAnalysisState& RetVal) {
@@ -654,7 +655,11 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
     if(FixedPointReached) {
         // Do binding.
-        llvm::Value *UpperBound = getUpperBoundForLoop(LoopToAnalyze);
+        llvm::Value *UpperBound;
+        bool Success = getUpperBoundForLoop(LoopToAnalyze, UpperBound);
+        if(!Success) {
+            return false;
+        }
         auto UpperBoundName = UpperBound->getName().str();
 
         // i must be <= UpperBound
