@@ -1019,12 +1019,14 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
 
                         ////llvm::outs() << "Found tail for " << *AssignedValue << ": "; TailMapping.debugPrint(*this); //llvm::outs() << "\n"; //llvm::outs().flush();
                         EWPTEntry NewEntry;
-                        if(!generateEntryFromHeapAssignment(PossibleAlias.Rank, EntranceConstraints, TailMapping, Offset, NewEntry)) {
+                        if(!generateEntryFromHeapAssignment(PossibleAlias.Rank, isl_set_copy(EntranceConstraints), TailMapping, Offset, NewEntry)) {
                             return false;
                         }
                         auto KeyForNewEntry = std::make_pair(NewEntry.Rank, NewEntry.HeapIdentifier);
                         RootMapping.Entries[KeyForNewEntry] = NewEntry; // TODO: merge it with existing entry
                     }
+
+                    isl_set_free(EntranceConstraints);
                 }
             }
         }
