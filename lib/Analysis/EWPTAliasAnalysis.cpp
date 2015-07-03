@@ -38,6 +38,7 @@ STATISTIC(NoScevForBasePointer, "EWPT Analysis Error: Could not convert base poi
 STATISTIC(WriteToAny, "EWPT Analysis Error: Potential write to ANY heap object");
 STATISTIC(CyclicHeapMemoryGraph, "EWPT Analysis Error: Heap memory graph has potential cycles");
 STATISTIC(CouldNotAffinateSCEV, "EWPT Analysis Error: SCEVAffinator failed on SCEV");
+STATISTIC(SuccessfulFunctionAnalysis, "EWPT Analysis Error: Function successfully analyzed");
 
 namespace ewpt {
 
@@ -365,6 +366,8 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
     Frame.RestrictToLoop = NULL;
     if(!iterativeControlFlowAnalysis(Frame)) {
         Frame.BlockOutStates.clear();
+    } else {
+        SuccessfulFunctionAnalysis++;
     }
 
     return false;
