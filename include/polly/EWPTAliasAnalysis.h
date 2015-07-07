@@ -194,6 +194,9 @@ public:
     std::vector<EWPTEntry*> getEntriesAtRank(unsigned Rank);
 
     void debugPrint(EWPTAliasAnalysis& Analysis);
+
+    static EWPTRoot Any(const EWPTAliasAnalysis& Analysis);
+    static EWPTRoot Null(const EWPTAliasAnalysis& Analysis);
 };
 
 

@@ -183,6 +183,38 @@ bool EWPTEntry::isSingleValued() {
 // EWPTRoot
 // ==============================
 
+EWPTRoot EWPTRoot::Any(const EWPTAliasAnalysis& Analysis) {
+    auto EmptySpace = isl_space_alloc(Analysis.IslContext, 0, 0, 0);
+
+    EWPTEntry Entry;
+    Entry.HeapIdentifier = HeapNameId::getAny();
+    Entry.AmountOfIterators = 0;
+    Entry.Rank = 0;
+    Entry.Mapping = isl_map_universe(EmptySpace);
+
+    EWPTRoot RetVal = EWPTRoot();
+    auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getAny());
+    RetVal.Entries[Key] = Entry;
+
+    return RetVal;
+}
+
+EWPTRoot EWPTRoot::Null(const EWPTAliasAnalysis& Analysis) {
+    auto EmptySpace = isl_space_alloc(Analysis.IslContext, 0, 0, 0);
+
+    EWPTEntry Entry;
+    Entry.HeapIdentifier = HeapNameId::getAny();
+    Entry.AmountOfIterators = 0;
+    Entry.Rank = 0;
+    Entry.Mapping = isl_map_universe(EmptySpace);
+
+    EWPTRoot RetVal = EWPTRoot();
+    auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getZero());
+    RetVal.Entries[Key] = Entry;
+
+    return RetVal;
+}
+
 bool EWPTRoot::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State, EWPTRoot& OutRoot) {
     EWPTRoot RetVal;
     for(auto& EntryPair : Entries) {
@@ -1101,32 +1133,12 @@ bool EWPTAliasAnalysis::getEWPTForValue(EWPTAliasAnalysisState& State, Value *Po
     }
     if(isNull) {
         // Return an EWPT root representing the zero value.
-        auto EmptySpace = isl_space_alloc(IslContext, 0, 0, 0);
-
-        EWPTEntry Entry;
-        Entry.HeapIdentifier = HeapNameId::getZero();
-        Entry.AmountOfIterators = 0;
-        Entry.Rank = 0;
-        Entry.Mapping = isl_map_universe(EmptySpace);
-
-        RetVal = EWPTRoot();
-        auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getZero());
-        RetVal.Entries[Key] = Entry;
+        RetVal = EWPTRoot::Null(*this);
         return true;
     }
 
     // No valid EWPT found, return an EWPT that can point to any value.
-    auto EmptySpace = isl_space_alloc(IslContext, 0, 0, 0);
-
-    EWPTEntry Entry;
-    Entry.HeapIdentifier = HeapNameId::getAny();
-    Entry.AmountOfIterators = 0;
-    Entry.Rank = 0;
-    Entry.Mapping = isl_map_universe(EmptySpace);
-
-    RetVal = EWPTRoot();
-    auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getAny());
-    RetVal.Entries[Key] = Entry;
+    RetVal = EWPTRoot::Any(*this);
 
     return false;
 }
