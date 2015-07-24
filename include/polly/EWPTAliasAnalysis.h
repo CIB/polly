@@ -318,7 +318,7 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
          * - We also carry over all the constraints for the subscripts of s
          * - We also add a constraint for x
          */
-        bool generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, const llvm::SCEV *BridgeValue, EWPTEntry &RetVal);
+        bool generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, isl_set *BridgeValue, EWPTEntry &RetVal);
 
         bool handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State, EWPTAliasAnalysisFrame& Frame);
 

@@ -168,11 +168,11 @@ bool EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
 }
 
 void EWPTEntry::debugPrint(EWPTAliasAnalysis &Analysis) {
-    //llvm::outs() << "<" << HeapIdentifier.toString();
+    llvm::outs() << "<" << HeapIdentifier.toString();
     if(Mapping != NULL) {
-        //llvm::outs() << " : " << Analysis.debugMappingToString(Mapping);
+        llvm::outs() << " : " << Analysis.debugMappingToString(Mapping);
     }
-    //llvm::outs() << ">(Depth:" << Rank << ")\n";
+    llvm::outs() << ">(Depth:" << Rank << ")\n";
 }
 
 bool EWPTEntry::isSingleValued() {
@@ -320,12 +320,12 @@ EWPTEntry *EWPTRoot::isSingleValued() {
 }
 
 void EWPTRoot::debugPrint(EWPTAliasAnalysis &Analysis) {
-    //llvm::outs() << "{\n";
+    llvm::outs() << "{\n";
     for(auto& EntryPair : Entries) {
         auto& Entry = EntryPair.second;
-        //llvm::outs() << "    (" << Entry.HeapIdentifier.toString() << ", " << Entry.Rank << ":" << EntryPair.first.first << ")\t->\t" << Analysis.debugMappingToString(Entry.Mapping) << "\n";
+        llvm::outs() << "    (" << Entry.HeapIdentifier.toString() << ", " << Entry.Rank << ":" << EntryPair.first.first << ")\t->\t" << Analysis.debugMappingToString(Entry.Mapping) << "\n";
     }
-    //llvm::outs() << "}" << "\n";
+    llvm::outs() << "}" << "\n";
 }
 
 // ==================================
@@ -755,14 +755,14 @@ EWPTRoot EWPTAliasAnalysis::MergeRoots(std::vector<EWPTRoot> RootsToMerge) {
 }
 
 void EWPTAliasAnalysis::debugPrintEWPTs(EWPTAliasAnalysisState& State) {
-    //llvm::outs() << "EWPTs:\n";
+    llvm::outs() << "EWPTs:\n";
     for(auto& Pair : State.trackedRoots) {
         if(Pair.second.Entries.size() == 0) {
             continue;
         }
 
         auto& RootValue = Pair.first;
-        //llvm::outs() << "<" << *RootValue << "> -> ";
+        llvm::outs() << "<" << *RootValue << "> -> ";
 
         Pair.second.debugPrint(*this);
     }
@@ -876,7 +876,7 @@ isl_set *EWPTAliasAnalysis::generateAliasConstraints(EWPTEntry& LeftHand, EWPTEn
  * - We also carry over all the constraints for the subscripts of s
  * - We also add a constraint for x
  */
-bool EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, const llvm::SCEV *BridgeValue, EWPTEntry& RetVal) {
+bool EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, isl_set *EntranceConstraints, EWPTEntry& AssigneeMapping, isl_set *SubscriptSet, EWPTEntry& RetVal) {
     ////llvm::outs() << "Generate Heap Assignment:: EntranceDepth = " << EntranceDepth << ", EntranceConstraints = " << debugSetToString(EntranceConstraints) << ", AssigneeMapping = " << debugMappingToString(AssigneeMapping.Mapping) << ", BridgeValue = " << *BridgeValue << "\n";
 
     // The new mapping will have the following subscripts:
@@ -903,20 +903,6 @@ bool EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, isl_s
     // constraints to the mapping we're generating.
     mergeParams(FilterSpace, NewMapping);
     NewMapping = isl_map_intersect_domain(NewMapping, FilterSpace);
-
-    // Next we add a bridge constraint to our mapping. The bridge constraint is the constraint for
-    // 'x' in the expression p[x] = q
-    isl_pw_aff *SubscriptAff = SCEVAffinator::getPwAff(this, BridgeValue, IslContext);
-    if(!SubscriptAff) {
-        return false;
-    }
-    isl_set *SubscriptSet = isl_map_range(isl_map_from_pw_aff(SubscriptAff));
-
-    // Currently we have a set of the form POINTER_SIZE * i, we need to convert this to just i
-    // The division is possible because we ensured an alignment that is a multiple of the pointer size.
-    std::string consString = "{ [i] -> [o] : i = " + std::to_string(DL->getPointerSize()) + "* o}";
-    auto DivisionMapping = isl_map_read_from_str(IslContext, consString.c_str());
-    SubscriptSet = isl_set_apply(SubscriptSet, DivisionMapping);
 
     // The SCEVAffinator gives us a mapping with a range of dimension 1.
     // We need to embed this dimension into the mapping we're generating, where this dimension
@@ -956,19 +942,10 @@ bool EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, isl_s
     RetVal.Rank = InputSize;
     RetVal.Mapping = NewMapping;
 
-    ////llvm::outs() << "Result: " << debugMappingToString(NewMapping) << "\n";
-
     return true;
 }
 
 bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State, EWPTAliasAnalysisFrame& Frame) {
-    // Make sure we're storing to an aligned position and something of pointer size.
-    if(AssigningInstruction->getAlignment() != DL->getPointerSize()) {
-        AddressNotPointerAligned++;
-        //llvm::errs() << "Storing to an address that isn't pointer aligned.\n";
-        return false;
-    }
-
     llvm::Value *AssignedValue = AssigningInstruction->getValueOperand();
     const SCEV *AccessFunction = SE->getSCEVAtScope(AssigningInstruction->getPointerOperand(), Frame.RestrictToLoop);
     auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
@@ -1041,25 +1018,103 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                     // Now build new mappings from our set for aliasing x_1, ..., x_d, the
                     // transition subscript x_{d+1} = x, and each EWPT in q
 
-                    for(auto& TailMappingPair : AssignedMapping.Entries) {
-                        auto& TailMapping = TailMappingPair.second;
+                    // If the store is pointer aligned, we only need to generate one new EWPT entry.
+                    // However, if the store isn't pointer aligned, we need to generate one "ANY" EWPT entry
+                    // for each pointer cell that is overwritten.
 
-                        // If we would build an EWPT entry for p that ends again in p, abort.
-                        if(TailMapping.HeapIdentifier.hasType == HeapNameId::MALLOC &&
-                           TailMapping.HeapIdentifier.SourceLocation == RootPair.first) {
-                            CyclicHeapMemoryGraph++;
-                            //llvm::errs() << "Cyclic heap memory graph detected, aborting.\n";
-                            return false;
-                        }
+                    // Compute the indices within the assignee heap object at which we're inserting
+                    // the new tail EWPT.
+                    //
+                    // If the store is pointer aligned, we need only consider one index
+                    // (the same index that we're storing the pointer value to).
+                    //
+                    // If the store isn't pointer aligned, we need to consider all indices that overlap
+                    // the memory region that is modified by the store.
 
-                        ////llvm::outs() << "Found tail for " << *AssignedValue << ": "; TailMapping.debugPrint(*this); //llvm::outs() << "\n"; //llvm::outs().flush();
-                        EWPTEntry NewEntry;
-                        if(!generateEntryFromHeapAssignment(PossibleAlias.Rank, isl_set_copy(EntranceConstraints), TailMapping, Offset, NewEntry)) {
-                            return false;
-                        }
-                        auto KeyForNewEntry = std::make_pair(NewEntry.Rank, NewEntry.HeapIdentifier);
-                        RootMapping.Entries[KeyForNewEntry] = NewEntry; // TODO: merge it with existing entry
+                    isl_pw_aff *SubscriptAff = SCEVAffinator::getPwAff(this, Offset, IslContext);
+                    if(!SubscriptAff) {
+                        return false;
                     }
+
+                    // Check if we can always divide the offset by the system's pointer width
+                    isl_pw_aff *Remainder = isl_pw_aff_mod_val(isl_pw_aff_copy(SubscriptAff), isl_val_int_from_si(IslContext, DL->getPointerSize()));
+                    isl_set *TestSet = isl_pw_aff_zero_set(Remainder);
+                    // If the zero set is universe, then the access is pointer aligned.
+                    // If the complement is empty, then the set is also pointer aligned.
+                    TestSet = isl_set_complement(TestSet);
+                    bool AccessIsPointerAligned = isl_set_is_empty(TestSet) && AssigningInstruction->getValueOperand()->getType()->getScalarSizeInBits() <= DL->getPointerSizeInBits();
+                    //llvm::outs() << "Bit size for instruction " << *AssigningInstruction << ": " << AssigningInstruction->getValueOperand()->getType()->getScalarSizeInBits() << " (<= " << DL->getPointerSizeInBits() << ")\n";
+                    //llvm::outs() << "Zero set " << debugSetToString(TestSet) << "\n";
+
+                    isl_set *SubscriptSet = isl_map_range(isl_map_from_pw_aff(SubscriptAff));
+
+                    // Currently we have a set of the form POINTER_SIZE * i, we need to convert this to just i
+                    std::string consString = "{ [i] -> [o] : i = " + std::to_string(DL->getPointerSize()) + "* o}";
+                    auto DivisionMapping = isl_map_read_from_str(IslContext, consString.c_str());
+                    SubscriptSet = isl_set_apply(SubscriptSet, DivisionMapping);
+
+                    EWPTEntry NewEntry;
+
+                    // Check if we're storing to an aligned position.
+                    if(!AccessIsPointerAligned) {
+                        // TODO: recursive ANY
+
+                        unsigned Alignment = AssigningInstruction->getAlignment();
+
+                        // Convert SubscriptSet from a single point to a range.
+                        consString = "[n] -> { [x] -> [] : n = x }";
+                        isl_map *ConvertToParams = isl_map_read_from_str(IslContext, consString.c_str());
+                        SubscriptSet = isl_set_apply(SubscriptSet, ConvertToParams);
+
+                        int AmountOfPointersOverwritten =
+                                (int) ceil((float) Alignment / DL->getPointerSize());
+                        consString = (std::string) "[n] -> { [i] : n <= i <= n + " + std::to_string(AmountOfPointersOverwritten) + " }";
+                        auto RangeSet = isl_set_read_from_str(IslContext, consString.c_str());
+
+                        SubscriptSet = isl_set_intersect_params(RangeSet, SubscriptSet);
+
+                        // We no longer need the parameter n
+                        SubscriptSet = isl_set_project_out(SubscriptSet, isl_dim_param, 0, 1);
+                        llvm::outs() << "subscript set: " << debugSetToString(SubscriptSet) << "\n";
+
+                        EWPTEntry AnyEntry;
+                        AnyEntry.AmountOfIterators = 0;
+                        AnyEntry.Rank = 0;
+                        AnyEntry.HeapIdentifier = HeapNameId::getAny();
+                        auto EmptySpace = isl_space_alloc(IslContext, 0, 0, 0);
+                        AnyEntry.Mapping = isl_map_universe(EmptySpace);
+
+                        if(!generateEntryFromHeapAssignment(PossibleAlias.Rank, isl_set_copy(EntranceConstraints), AnyEntry, SubscriptSet, NewEntry)) {
+                            return false;
+                        }
+
+                        NewEntry.debugPrint(*this);
+                    } else {
+                        for(auto& TailMappingPair : AssignedMapping.Entries) {
+                            auto& TailMapping = TailMappingPair.second;
+
+                            // If we would build an EWPT entry for p that ends again in p, abort.
+                            if(TailMapping.HeapIdentifier.hasType == HeapNameId::MALLOC &&
+                               TailMapping.HeapIdentifier.SourceLocation == RootPair.first) {
+                                CyclicHeapMemoryGraph++;
+                                //llvm::errs() << "Cyclic heap memory graph detected, aborting.\n";
+                                return false;
+                            }
+
+                            if(!generateEntryFromHeapAssignment(PossibleAlias.Rank, isl_set_copy(EntranceConstraints), TailMapping, SubscriptSet, NewEntry)) {
+                                return false;
+                            }
+                        }
+                    }
+
+                    auto KeyForNewEntry = std::make_pair(NewEntry.Rank, NewEntry.HeapIdentifier);
+                    if(!RootMapping.Entries.count(KeyForNewEntry)) {
+                        RootMapping.Entries[KeyForNewEntry] = NewEntry;
+                    } else {
+                        RootMapping.Entries[KeyForNewEntry] = RootMapping.Entries[KeyForNewEntry].merge(NewEntry);
+                    }
+
+                    RootMapping.Entries[KeyForNewEntry].debugPrint(*this);
 
                     isl_set_free(EntranceConstraints);
                 }
