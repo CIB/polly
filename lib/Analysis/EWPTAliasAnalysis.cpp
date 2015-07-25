@@ -139,7 +139,7 @@ bool EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
 
     //llvm::outs() << "Attempting to apply subscript " << *Subscript << " to "; this->debugPrint(Analysis); //llvm::outs() << "\n";
 
-    isl_pw_aff *SubscriptAff = SCEVAffinator::getPwAff(&Analysis, Subscript, Analysis.IslContext);
+    isl_pw_aff *SubscriptAff = Analysis.getSubscriptSetForOffset(Subscript, Analysis.DL->getPointerSize());
     if(!SubscriptAff) {
         return false;
     }
