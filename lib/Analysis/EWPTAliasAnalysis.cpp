@@ -811,7 +811,7 @@ isl_pw_aff *EWPTAliasAnalysis::getSubscriptSetForOffset(const SCEV *Offset, int 
     }
 
     // Check if we can always divide the offset by the system's pointer width
-    isl_pw_aff *Remainder = isl_pw_aff_mod_val(isl_pw_aff_copy(SubscriptAff), isl_val_int_from_si(IslContext, DL->getPointerSize()));
+    isl_pw_aff *Remainder = isl_pw_aff_mod_val(isl_pw_aff_copy(SubscriptAff), isl_val_int_from_si(IslContext, Alignment));
     isl_set *TestSet = isl_pw_aff_zero_set(Remainder);
 
     // If the zero set is universe, then the access is pointer aligned.
@@ -1149,21 +1149,24 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
 bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
     ////llvm::outs() << "Handling Load\n";
 
+    if(!CurrentLoadInst->getPointerOperand()->getType()->isPointerTy()) {
+        State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this);
+        return true;
+    }
+
     const SCEV *AccessFunction = SE->getSCEVAtScope(CurrentLoadInst->getPointerOperand(), Frame.RestrictToLoop);
     auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
 
     if (!BasePointer) {
-        NoScevForBasePointer++;
-        //llvm::errs() << "Can not handle base pointer for " << *CurrentLoadInst << "\n";
-        return false;
+        State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this);
+        return true;
     }
 
     auto BaseValue = BasePointer->getValue();
 
     if (isa<UndefValue>(BaseValue)) {
-        NoScevForBasePointer++;
-        //llvm::errs() << "Can not handle base value for " << *CurrentLoadInst << "\n";
-        return false;
+        State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this);
+        return true;
     }
 
     auto Offset = SE->getMinusSCEV(AccessFunction, BasePointer);
@@ -1175,7 +1178,8 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
         // We're indexing into the loaded EWPT, so apply a subscript
         EWPTRoot NewRoot;
         if(!LoadedFrom.ApplySubscript(*this, Offset, Frame, State, NewRoot)) {
-            return false;
+            State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this);
+            return true;
         }
         State.trackedRoots[CurrentLoadInst] = NewRoot;
     }
