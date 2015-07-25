@@ -792,6 +792,30 @@ std::string EWPTAliasAnalysis::debugMappingToString(isl_map *Map) {
     return RetVal;
 }
 
+isl_pw_aff *EWPTAliasAnalysis::getSubscriptSetForOffset(const SCEV *Offset, int Alignment) {
+    isl_pw_aff *SubscriptAff = SCEVAffinator::getPwAff(this, Offset, IslContext);
+    if(!SubscriptAff) {
+        return NULL;
+    }
+
+    // Check if we can always divide the offset by the system's pointer width
+    isl_pw_aff *Remainder = isl_pw_aff_mod_val(isl_pw_aff_copy(SubscriptAff), isl_val_int_from_si(IslContext, DL->getPointerSize()));
+    isl_set *TestSet = isl_pw_aff_zero_set(Remainder);
+
+    // If the zero set is universe, then the access is pointer aligned.
+    // If the complement is empty, then the set is also pointer aligned.
+    TestSet = isl_set_complement(TestSet);
+    bool AccessIsPointerAligned = isl_set_is_empty(TestSet);
+    isl_set_free(TestSet);
+
+    if(AccessIsPointerAligned) {
+        return SubscriptAff;
+    } else {
+        isl_pw_aff_free(SubscriptAff);
+        return NULL;
+    }
+}
+
 void EWPTAliasAnalysis::mergeParams(isl_map*& First, isl_map*& Second) {
     auto Space = isl_map_get_space(First);
     Second = isl_map_align_params(Second, Space);
@@ -1031,20 +1055,10 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                     // If the store isn't pointer aligned, we need to consider all indices that overlap
                     // the memory region that is modified by the store.
 
-                    isl_pw_aff *SubscriptAff = SCEVAffinator::getPwAff(this, Offset, IslContext);
-                    if(!SubscriptAff) {
-                        return false;
-                    }
-
-                    // Check if we can always divide the offset by the system's pointer width
-                    isl_pw_aff *Remainder = isl_pw_aff_mod_val(isl_pw_aff_copy(SubscriptAff), isl_val_int_from_si(IslContext, DL->getPointerSize()));
-                    isl_set *TestSet = isl_pw_aff_zero_set(Remainder);
-                    // If the zero set is universe, then the access is pointer aligned.
-                    // If the complement is empty, then the set is also pointer aligned.
-                    TestSet = isl_set_complement(TestSet);
-                    bool AccessIsPointerAligned = isl_set_is_empty(TestSet) && AssigningInstruction->getValueOperand()->getType()->getScalarSizeInBits() <= DL->getPointerSizeInBits();
+                    isl_pw_aff *SubscriptAff = this->getSubscriptSetForOffset(Offset, DL->getPointerSize());
+                    bool AccessIsPointerAligned = SubscriptAff && AssigningInstruction->getValueOperand()->getType()->getScalarSizeInBits() <= DL->getPointerSizeInBits();
                     //llvm::outs() << "Bit size for instruction " << *AssigningInstruction << ": " << AssigningInstruction->getValueOperand()->getType()->getScalarSizeInBits() << " (<= " << DL->getPointerSizeInBits() << ")\n";
-                    //llvm::outs() << "Zero set " << debugSetToString(TestSet) << "\n";
+                    //htllvm::outs() << "Zero set " << debugSetToString(TestSet) << "\n";
 
                     isl_set *SubscriptSet = isl_map_range(isl_map_from_pw_aff(SubscriptAff));
 
@@ -1127,14 +1141,6 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
 
 bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
     ////llvm::outs() << "Handling Load\n";
-
-    // Make sure the alignment is a multiple of pointer size.
-    if(CurrentLoadInst->getAlignment() % DL->getPointerSize() != 0) {
-        AddressNotPointerAligned++;
-        //llvm::errs() << "Load with alignment (" << CurrentLoadInst->getAlignment() <<
-        //                ") that's not a multiple of pointer size (" << DL->getPointerSize() << ")\n";
-        return false;
-    }
 
     const SCEV *AccessFunction = SE->getSCEVAtScope(CurrentLoadInst->getPointerOperand(), Frame.RestrictToLoop);
     auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
