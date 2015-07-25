@@ -167,6 +167,9 @@ public:
 
     EWPTEntry intersect(EWPTEntry& Other);
 
+    static EWPTEntry getAny(const EWPTAliasAnalysis& Analysis);
+    static EWPTEntry getNull(const EWPTAliasAnalysis& Analysis);
+
     bool isSingleValued();
 
 private:

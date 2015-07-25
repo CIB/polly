@@ -179,11 +179,7 @@ bool EWPTEntry::isSingleValued() {
     return isl_map_is_single_valued(Mapping);
 }
 
-// ==============================
-// EWPTRoot
-// ==============================
-
-EWPTRoot EWPTRoot::Any(const EWPTAliasAnalysis& Analysis) {
+EWPTEntry EWPTEntry::getAny(const EWPTAliasAnalysis& Analysis) {
     auto EmptySpace = isl_space_alloc(Analysis.IslContext, 0, 0, 0);
 
     EWPTEntry Entry;
@@ -191,6 +187,28 @@ EWPTRoot EWPTRoot::Any(const EWPTAliasAnalysis& Analysis) {
     Entry.AmountOfIterators = 0;
     Entry.Rank = 0;
     Entry.Mapping = isl_map_universe(EmptySpace);
+
+    return Entry;
+}
+
+EWPTEntry EWPTEntry::getNull(const EWPTAliasAnalysis& Analysis) {
+    auto EmptySpace = isl_space_alloc(Analysis.IslContext, 0, 0, 0);
+
+    EWPTEntry Entry;
+    Entry.HeapIdentifier = HeapNameId::getZero();
+    Entry.AmountOfIterators = 0;
+    Entry.Rank = 0;
+    Entry.Mapping = isl_map_universe(EmptySpace);
+
+    return Entry;
+}
+
+// ==============================
+// EWPTRoot
+// ==============================
+
+EWPTRoot EWPTRoot::Any(const EWPTAliasAnalysis& Analysis) {
+    EWPTEntry Entry = EWPTEntry::getAny(Analysis);
 
     EWPTRoot RetVal = EWPTRoot();
     auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getAny());
@@ -200,13 +218,7 @@ EWPTRoot EWPTRoot::Any(const EWPTAliasAnalysis& Analysis) {
 }
 
 EWPTRoot EWPTRoot::Null(const EWPTAliasAnalysis& Analysis) {
-    auto EmptySpace = isl_space_alloc(Analysis.IslContext, 0, 0, 0);
-
-    EWPTEntry Entry;
-    Entry.HeapIdentifier = HeapNameId::getAny();
-    Entry.AmountOfIterators = 0;
-    Entry.Rank = 0;
-    Entry.Mapping = isl_map_universe(EmptySpace);
+    EWPTEntry Entry = EWPTEntry::getNull(Analysis);
 
     EWPTRoot RetVal = EWPTRoot();
     auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getZero());
@@ -1091,12 +1103,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                         SubscriptSet = isl_set_project_out(SubscriptSet, isl_dim_param, 0, 1);
                         llvm::outs() << "subscript set: " << debugSetToString(SubscriptSet) << "\n";
 
-                        EWPTEntry AnyEntry;
-                        AnyEntry.AmountOfIterators = 0;
-                        AnyEntry.Rank = 0;
-                        AnyEntry.HeapIdentifier = HeapNameId::getAny();
-                        auto EmptySpace = isl_space_alloc(IslContext, 0, 0, 0);
-                        AnyEntry.Mapping = isl_map_universe(EmptySpace);
+                        EWPTEntry AnyEntry = EWPTEntry::getAny(*this);
 
                         if(!generateEntryFromHeapAssignment(PossibleAlias.Rank, isl_set_copy(EntranceConstraints), AnyEntry, SubscriptSet, NewEntry)) {
                             return false;
@@ -1244,12 +1251,7 @@ bool EWPTAliasAnalysis::runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Fr
                 EWPTRoot Root;
                 bool Success = this->getEWPTForValue(RetValState, IncomingValue, Root);
                 if(!Success) {
-                    auto EmptySpace = isl_space_alloc(IslContext, 0, 0, 0);
-                    EWPTEntry Entry;
-                    Entry.HeapIdentifier = HeapNameId::getAny();
-                    Entry.AmountOfIterators = 0;
-                    Entry.Rank = 0;
-                    Entry.Mapping = isl_map_universe(EmptySpace);
+                    EWPTEntry Entry = EWPTEntry::getAny(*this);
 
                     Root = EWPTRoot();
                     auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getAny());
