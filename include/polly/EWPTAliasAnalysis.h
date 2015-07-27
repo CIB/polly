@@ -281,13 +281,15 @@ class EWPTAliasAnalysis: public FunctionPass, public AliasAnalysis
         EWPTRoot MergeRoots(std::vector<EWPTRoot> RootsToMerge);
 
         /**
-         * Returns an isl_pw_aff containing exactly the value represented by the Offset SCEV divided by
+         * Returns an isl_pw_aff containing the value represented by the Offset SCEV divided by
          * the alignment.
          *
-         * If the SCEV can not be converted to a linear expression, or if it can not be guaranteed
-         * that the offset can be divided by the alignment, then NULL is yielded.
+         * If the SCEV can not be converted to a linear expression, returns NULL.
+         *
+         * The parameter `HasPointerAlignment` is overwritten with whether pointer alignment
+         * can be guaranteed for this offset.
          */
-        isl_pw_aff *getSubscriptSetForOffset(const SCEV *Offset, int Alignment);
+        isl_pw_aff *getSubscriptSetForOffset(const SCEV *Offset, int Alignment, bool& HasPointerAlignment);
 
         void debugPrintEWPTs(EWPTAliasAnalysisState& State);
 

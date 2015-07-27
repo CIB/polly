@@ -33,7 +33,6 @@ using namespace llvm;
 STATISTIC(NoCanonicalInductionVariable, "EWPT Analysis Error: No canonical induction variable for loop");
 STATISTIC(TooManyLoopBackEdges, "EWPT Analysis Error: Too many loop back edges");
 STATISTIC(LoopDidNotConverge, "EWPT Analysis Error: Loop did not converge");
-STATISTIC(AddressNotPointerAligned, "EWPT Analysis Error: Accessing an address that isn't pointer aligned");
 STATISTIC(NoScevForBasePointer, "EWPT Analysis Error: Could not convert base pointer for store to known SCEV");
 STATISTIC(WriteToAny, "EWPT Analysis Error: Potential write to ANY heap object");
 STATISTIC(CyclicHeapMemoryGraph, "EWPT Analysis Error: Heap memory graph has potential cycles");
@@ -139,8 +138,9 @@ bool EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
 
     //llvm::outs() << "Attempting to apply subscript " << *Subscript << " to "; this->debugPrint(Analysis); //llvm::outs() << "\n";
 
-    isl_pw_aff *SubscriptAff = Analysis.getSubscriptSetForOffset(Subscript, Analysis.DL->getPointerSize());
-    if(!SubscriptAff) {
+    bool IsPointerAligned;
+    isl_pw_aff *SubscriptAff = Analysis.getSubscriptSetForOffset(Subscript, Analysis.DL->getPointerSize(), IsPointerAligned);
+    if(!SubscriptAff || !IsPointerAligned) {
         return false;
     }
     isl_set *SubscriptSet = isl_map_range(isl_map_from_pw_aff(SubscriptAff));
@@ -804,9 +804,10 @@ std::string EWPTAliasAnalysis::debugMappingToString(isl_map *Map) {
     return RetVal;
 }
 
-isl_pw_aff *EWPTAliasAnalysis::getSubscriptSetForOffset(const SCEV *Offset, int Alignment) {
+isl_pw_aff *EWPTAliasAnalysis::getSubscriptSetForOffset(const SCEV *Offset, int Alignment, bool& IsPointerAligned) {
     isl_pw_aff *SubscriptAff = SCEVAffinator::getPwAff(this, Offset, IslContext);
     if(!SubscriptAff) {
+        IsPointerAligned = false;
         return NULL;
     }
 
@@ -817,15 +818,10 @@ isl_pw_aff *EWPTAliasAnalysis::getSubscriptSetForOffset(const SCEV *Offset, int 
     // If the zero set is universe, then the access is pointer aligned.
     // If the complement is empty, then the set is also pointer aligned.
     TestSet = isl_set_complement(TestSet);
-    bool AccessIsPointerAligned = isl_set_is_empty(TestSet);
+    IsPointerAligned = isl_set_is_empty(TestSet);
     isl_set_free(TestSet);
 
-    if(AccessIsPointerAligned) {
-        return SubscriptAff;
-    } else {
-        isl_pw_aff_free(SubscriptAff);
-        return NULL;
-    }
+    return SubscriptAff;
 }
 
 void EWPTAliasAnalysis::mergeParams(isl_map*& First, isl_map*& Second) {
@@ -1067,8 +1063,14 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                     // If the store isn't pointer aligned, we need to consider all indices that overlap
                     // the memory region that is modified by the store.
 
-                    isl_pw_aff *SubscriptAff = this->getSubscriptSetForOffset(Offset, DL->getPointerSize());
-                    bool AccessIsPointerAligned = SubscriptAff && AssigningInstruction->getValueOperand()->getType()->getScalarSizeInBits() <= DL->getPointerSizeInBits();
+                    bool AccessIsPointerAligned;
+                    isl_pw_aff *SubscriptAff = this->getSubscriptSetForOffset(Offset, DL->getPointerSize(), AccessIsPointerAligned);
+
+                    if(!SubscriptAff) {
+                        return false;
+                    }
+
+                    AccessIsPointerAligned = AccessIsPointerAligned && AssigningInstruction->getValueOperand()->getType()->getScalarSizeInBits() <= DL->getPointerSizeInBits();
                     //llvm::outs() << "Bit size for instruction " << *AssigningInstruction << ": " << AssigningInstruction->getValueOperand()->getType()->getScalarSizeInBits() << " (<= " << DL->getPointerSizeInBits() << ")\n";
                     //htllvm::outs() << "Zero set " << debugSetToString(TestSet) << "\n";
 
