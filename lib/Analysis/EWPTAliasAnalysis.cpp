@@ -454,7 +454,7 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
 
         //llvm::outs() << "Predecessor states:\n";
         for(auto State : getPredecessorStates(Frame, Current)) {
-            debugPrintEWPTs(*State);
+            //debugPrintEWPTs(*State);
         }
         auto StartWithState = MergeStates(getPredecessorStates(Frame, Current));
         if(!runOnBlock(*Current, Frame, StartWithState, Frame.BlockOutStates[Current])) {
@@ -619,7 +619,7 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
                     SuperFrame.BlockOutStates[Pair.first] = SuperFrame.BlockOutStates[Pair.first].merge(Pair.second);
                 }
                 //llvm::outs() << "Propagating up \n" << Pair.first->getName() << ":::::\n";
-                debugPrintEWPTs(SuperFrame.BlockOutStates[Pair.first]);
+                //debugPrintEWPTs(SuperFrame.BlockOutStates[Pair.first]);
                 //llvm::outs() << "\n";
             }
         }
@@ -1312,7 +1312,7 @@ bool EWPTAliasAnalysis::runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Fr
         }
 
         //llvm::outs() << "State after handling instruction " << CurrentInstruction << ":\n";
-        debugPrintEWPTs(RetValState);
+        //debugPrintEWPTs(RetValState);
     }
 
     return true;
@@ -1386,10 +1386,10 @@ AliasResult EWPTAliasAnalysis::alias(const MemoryLocation& LocA, const MemoryLoc
     //llvm::outs() << "Container block B: " << *ContainerBlockB << "\n";
 
     //llvm::outs() << "EWPT A:";
-    debugPrintEWPTs(OutStateA);
+    //debugPrintEWPTs(OutStateA);
     //llvm::outs() << "\n";
     //llvm::outs() << "EWPT B:";
-    debugPrintEWPTs(OutStateB);
+    //debugPrintEWPTs(OutStateB);
     //llvm::outs() << "\n";
 
     //llvm::outs() << "RootA";
