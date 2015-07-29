@@ -38,6 +38,7 @@ STATISTIC(WriteToAny, "EWPT Analysis Error: Potential write to ANY heap object")
 STATISTIC(CyclicHeapMemoryGraph, "EWPT Analysis Error: Heap memory graph has potential cycles");
 STATISTIC(CouldNotAffinateSCEV, "EWPT Analysis Error: SCEVAffinator failed on SCEV");
 STATISTIC(SuccessfulFunctionAnalysis, "EWPT Analysis Error: Function successfully analyzed");
+STATISTIC(SuccessfulDepthTwoEWPT, "EWPT Analysis Error: Depth two EWPT found");
 
 namespace ewpt {
 
@@ -409,9 +410,25 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
     Frame.BeginBlocks.insert(BeginBlock);
     Frame.RestrictToLoop = NULL;
     if(!iterativeControlFlowAnalysis(Frame)) {
+        // Ensure that no aliasing info is provided.
         Frame.BlockOutStates.clear();
     } else {
         SuccessfulFunctionAnalysis++;
+        bool DepthTwoEWPT = false;
+        for(auto& OutStatePair : Frame.BlockOutStates) {
+            for(auto& RootPair : OutStatePair.second.trackedRoots) {
+                for(auto& EntryPair : RootPair.second.Entries) {
+                    auto& Entry = EntryPair.second;
+                    if(Entry.Rank >= 2) {
+                        DepthTwoEWPT = true;
+                    }
+                }
+            }
+        }
+
+        if(DepthTwoEWPT) {
+            SuccessfulDepthTwoEWPT++;
+        }
     }
 
     return false;
@@ -453,9 +470,6 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
         Frame.BlocksToProcess.pop();
 
         //llvm::outs() << "Predecessor states:\n";
-        for(auto State : getPredecessorStates(Frame, Current)) {
-            //debugPrintEWPTs(*State);
-        }
         auto StartWithState = MergeStates(getPredecessorStates(Frame, Current));
         if(!runOnBlock(*Current, Frame, StartWithState, Frame.BlockOutStates[Current])) {
             return false;
