@@ -38,7 +38,7 @@ STATISTIC(WriteToAny, "EWPT Analysis Error: Potential write to ANY heap object")
 STATISTIC(CyclicHeapMemoryGraph, "EWPT Analysis Error: Heap memory graph has potential cycles");
 STATISTIC(CouldNotAffinateSCEV, "EWPT Analysis Error: SCEVAffinator failed on SCEV");
 STATISTIC(SuccessfulFunctionAnalysis, "EWPT Analysis Error: Function successfully analyzed");
-STATISTIC(SuccessfulDepthTwoEWPT, "EWPT Analysis Error: Depth two EWPT found");
+STATISTIC(SuccessfulRankOneEWPT, "EWPT Analysis Error: Depth two EWPT found");
 
 namespace ewpt {
 
@@ -414,20 +414,20 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
         Frame.BlockOutStates.clear();
     } else {
         SuccessfulFunctionAnalysis++;
-        bool DepthTwoEWPT = false;
+        bool RankOneEntry = false;
         for(auto& OutStatePair : Frame.BlockOutStates) {
             for(auto& RootPair : OutStatePair.second.trackedRoots) {
                 for(auto& EntryPair : RootPair.second.Entries) {
                     auto& Entry = EntryPair.second;
-                    if(Entry.Rank >= 2) {
-                        DepthTwoEWPT = true;
+                    if(Entry.Rank >= 1) {
+                        RankOneEntry = true;
                     }
                 }
             }
         }
 
-        if(DepthTwoEWPT) {
-            SuccessfulDepthTwoEWPT++;
+        if(RankOneEntry) {
+            SuccessfulRankOneEWPT++;
         }
     }
 
