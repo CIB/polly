@@ -30,7 +30,6 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "ewpt"
-STATISTIC(NoCanonicalInductionVariable, "EWPT Analysis Error: No canonical induction variable for loop");
 STATISTIC(TooManyLoopBackEdges, "EWPT Analysis Error: Too many loop back edges");
 STATISTIC(LoopDidNotConverge, "EWPT Analysis Error: Loop did not converge");
 STATISTIC(NoScevForBasePointer, "EWPT Analysis Error: Could not convert base pointer for store to known SCEV");
@@ -381,7 +380,7 @@ std::vector<llvm::Value*> EWPTAliasAnalysisFrame::GetCurrentLoopIterators() {
     std::vector<llvm::Value*> RetVal;
     EWPTAliasAnalysisFrame *Current = this;
     while(Current->SuperFrame != NULL) {
-        RetVal.push_back(Current->RestrictToLoop->getCanonicalInductionVariable());
+        RetVal.push_back(Current->RestrictToLoop->getHeader());
         Current = Current->SuperFrame;
     };
     return RetVal;
@@ -404,6 +403,16 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
     DL = &(F.getParent()->getDataLayout());
 
     InitializeAliasAnalysis(this, DL);
+
+    /*
+     * Print all SCEVs in function.
+      for(auto& Block : F) {
+        for(auto& Value : Block) {
+            if(SE->isSCEVable(Value.getType())) {
+                llvm::outs() << "SCEV: " << *SE->getSCEV(&Value) << "\n";
+            }
+        }
+    }*/
 
     // The actual analysis.
     auto BeginBlock = &(F.getEntryBlock());
@@ -538,34 +547,8 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
     return true;
 }
 
-bool EWPTAliasAnalysis::getUpperBoundForLoop(Loop& LoopToAnalyze, Value *&RetVal) {
-    BasicBlock* LoopHeader = LoopToAnalyze.getHeader();
-    for(auto& Instruction : LoopHeader->getInstList()) {
-        ////llvm::outs() << "Checking " << Instruction << "\n";
-        if(auto Comparison = dyn_cast<ICmpInst>(&Instruction)) {
-            if(
-                Comparison->getOperand(0) == LoopToAnalyze.getCanonicalInductionVariable() &&
-                Comparison->isFalseWhenEqual()
-            ) {
-                RetVal = Comparison->getOperand(1);
-                return true;
-            }
-        }
-    }
-
-    //llvm::outs() << "No upper bound found for loop.\n";
-    return false;
-}
-
 bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBlock& LoopHeader, Loop& LoopToAnalyze, EWPTAliasAnalysisState& RetVal) {
     // We can only handle loops of a specific type, check these properties first.
-
-    // It must have a canonical induction variable, i.e. for(i = 0; i < n; i++)
-    if(!LoopToAnalyze.getCanonicalInductionVariable()) {
-        ++NoCanonicalInductionVariable;
-        //llvm::errs() << "No canonical induction variable found for loop " << LoopToAnalyze << ", consider prepending the -indvars pass.\n";
-        return false;
-    }
 
     // It must have exactly one back edge to the loop header.
     if(LoopToAnalyze.getNumBackEdges() != 1) {
@@ -574,14 +557,12 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         return false;
     }
 
-    //llvm::outs() << "(loop) Entering loop " << LoopHeader.getName() << "\n";
-
     // The loop must also be dominated by its header and all edges from outside the loop
     // must point toward the loop header, but these are already requirements for "natural loops"
     // as recognized by LoopInfo.
 
     EWPTAliasAnalysisState ExitState;
-    auto InductionVariable = LoopToAnalyze.getCanonicalInductionVariable();
+    auto InductionVariable = LoopToAnalyze.getHeader();
     auto IVName = InductionVariable->getName().str();
 
     auto EntryState = MergeStates(getPredecessorStates(SuperFrame, &LoopHeader));
@@ -608,13 +589,11 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         }
 
         // Start the sub-analysis with the loop header as "exit node"
-        ////llvm::outs() << "Entering loop " << LoopToAnalyze << "\n";
         bool Success = iterativeControlFlowAnalysis(SubFrame);
         if(!Success) {
             //llvm::outs() << "Control flow analysis in sub-frame failed\n";
             return false;
         }
-        ////llvm::outs() << "Exiting loop " << LoopToAnalyze << "\n";
 
         // Extract the out state of the loop header (later: all loop exits)
         ExitState = SubFrame.BlockOutStates[SubFrame.Exit];
@@ -632,14 +611,8 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
                 } else {
                     SuperFrame.BlockOutStates[Pair.first] = SuperFrame.BlockOutStates[Pair.first].merge(Pair.second);
                 }
-                //llvm::outs() << "Propagating up \n" << Pair.first->getName() << ":::::\n";
-                //debugPrintEWPTs(SuperFrame.BlockOutStates[Pair.first]);
-                //llvm::outs() << "\n";
             }
         }
-
-        ////llvm::outs() << "State before aging.\n";
-        //debugPrintEWPTs(ExitState);
 
         // Replace "i" by "i-" for the state of the loop header
         // Add a new "i"
@@ -648,7 +621,6 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
             auto& PointsToMapping = RootPair.second;
             for(auto& EntryPair : PointsToMapping.Entries) {
                 auto& Entry = EntryPair.second;
-                ////llvm::outs() << "Mapping before aging: "; Entry.debugPrint(*this); //llvm::outs() << "\n";
 
                 // Rename i to i- by adding a new param i- with ( i- = i) and projecting out i
                 auto Model = isl_space_params_alloc(IslContext, 2);
@@ -663,10 +635,7 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
                 Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, -1);
                 Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, 1);
                 Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
-                ////llvm::outs() << "Mapping before projecting out: "; Entry.debugPrint(*this); //llvm::outs() << "\n";
                 Entry.Mapping = isl_map_project_out(Entry.Mapping, isl_dim_param, 0, 1);
-                ////llvm::outs() << "Mapping after renaming: "; Entry.debugPrint(*this); //llvm::outs() << "\n";
-
 
                 // Add a new parameter i and add the constraint that i- < i
                 Model = isl_space_params_alloc(IslContext, 2);
@@ -689,10 +658,14 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
                     llvm::Value *Variable = (llvm::Value*) isl_id_get_user(DimIdentifier);
                     isl_id_free(DimIdentifier);
 
-                    // Check if it's constant
-                    if(Variable == InductionVariable) {
+                    // Check if it's a loop induction variable. If it is, it must either be the
+                    // loop induction variable of this loop (we don't project that one out), or
+                    // of an outer loop (which is constant during this loop).
+                    if(isa<llvm::BasicBlock>(Variable)) {
                         continue;
                     }
+
+                    // If it's a regular LLVM value, we just ask the loop whether it's invariant.
                     if(!SubFrame.RestrictToLoop->isLoopInvariant(Variable)) {
                         // Not constant, must project it out.
                         Entry.Mapping = isl_map_project_out(Entry.Mapping, isl_dim_param, i, 1);
@@ -716,12 +689,38 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
     if(FixedPointReached) {
         // Do binding.
-        llvm::Value *UpperBound;
-        bool Success = getUpperBoundForLoop(LoopToAnalyze, UpperBound);
-        if(!Success) {
+
+        llvm::outs() << "Before binding\n";
+        debugPrintEWPTs(EntryState);
+
+        // Compute a set containing the upper bound as single point.
+        const SCEV *UpperBoundSCEV = SE->getBackedgeTakenCount(&LoopToAnalyze);
+        if(isa<llvm::SCEVCouldNotCompute>(UpperBoundSCEV)) {
             return false;
         }
-        auto UpperBoundName = UpperBound->getName().str();
+
+        isl_pw_aff *UpperBound = SCEVAffinator::getPwAff(this, UpperBoundSCEV, IslContext);
+        isl_set *BoundSet = isl_map_range(isl_map_from_pw_aff(UpperBound));
+
+        // Add the constraint that the iterator be smaller than the upper bound.
+        auto Identifier = isl_id_alloc(IslContext, IVName.c_str(), InductionVariable);
+        auto Model = isl_space_params_alloc(IslContext, 1);
+        Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
+        BoundSet = isl_set_align_params(BoundSet, Model);
+
+        // i <= UpperBound
+        auto Constraint = isl_inequality_alloc(isl_local_space_from_space(isl_set_get_space(BoundSet)));
+        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, 1);
+        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_set, 0, -1);
+        BoundSet = isl_set_add_constraint(BoundSet, Constraint);
+
+        // 0 <= i
+        Constraint = isl_inequality_alloc(isl_local_space_from_space(isl_set_get_space(BoundSet)));
+        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, -1);
+        BoundSet = isl_set_add_constraint(BoundSet, Constraint);
+
+        // Project out the set dimension.
+        BoundSet = isl_set_project_out(BoundSet, isl_dim_set, 0, 1);
 
         // i must be <= UpperBound
 
@@ -729,26 +728,24 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
             auto& PointsToMapping = RootPair.second;
             for(auto& EntryPair : PointsToMapping.Entries) {
                 auto& Entry = EntryPair.second;
-                auto Model = isl_space_params_alloc(IslContext, 2);
-                auto Identifier = isl_id_alloc(IslContext, IVName.c_str(), InductionVariable);
-                Model = isl_space_set_dim_id(Model, isl_dim_param, 0, Identifier);
-                Identifier = isl_id_alloc(IslContext, UpperBoundName.c_str(), UpperBound);
-                Model = isl_space_set_dim_id(Model, isl_dim_param, 1, Identifier);
-                Entry.Mapping = isl_map_align_params(Entry.Mapping, Model);
 
-                auto Constraint = isl_inequality_alloc(isl_local_space_from_space(isl_map_get_space(Entry.Mapping)));
-                Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, -1);
-                Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, 1);
-                Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
-                ////llvm::outs() << "Binding before projecting out: "; Entry.debugPrint(*this); //llvm::outs() << "\n";
+                isl_set *BoundSetTmp = isl_set_copy(BoundSet);
+                mergeParams(BoundSetTmp, Entry.Mapping);
+                Entry.Mapping = isl_map_intersect_params(Entry.Mapping, BoundSetTmp);
+
+                // We know that the induction variable is at parameter position 0 because we aligned
+                // the UpperBoundSet that way.
                 Entry.Mapping = isl_map_project_out(Entry.Mapping, isl_dim_param, 0, 1);
-                ////llvm::outs() << "Binding after projecting out: "; Entry.debugPrint(*this); //llvm::outs() << "\n";
 
                 EntryState.trackedRoots[RootPair.first].Entries[EntryPair.first] = Entry;
             }
         }
 
-        //llvm::outs() << "(loop) Exiting loop " << LoopHeader.getName() << "\n";
+        isl_set_free(BoundSet);
+
+        llvm::outs() << "After binding\n";
+        debugPrintEWPTs(EntryState);
+
         RetVal = EntryState;
         return true;
     }
@@ -993,6 +990,9 @@ bool EWPTAliasAnalysis::generateEntryFromHeapAssignment(int EntranceDepth, isl_s
 
 bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EWPTAliasAnalysisState& State, EWPTAliasAnalysisFrame& Frame) {
     llvm::Value *AssignedValue = AssigningInstruction->getValueOperand();
+    /*llvm::outs() << "In Loop " << Frame.RestrictToLoop << "\n";
+    llvm::outs() << "Surrounding loop" << LI->getLoopFor(AssigningInstruction->getParent()) << "\n";*/
+
     const SCEV *AccessFunction = SE->getSCEVAtScope(AssigningInstruction->getPointerOperand(), Frame.RestrictToLoop);
     auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
 
@@ -1011,6 +1011,9 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
     }
 
     auto Offset = SE->getMinusSCEV(AccessFunction, BasePointer);
+    /*llvm::outs() << "Access Function: ";
+    AccessFunction->dump();
+    llvm::outs() << "\n";*/
 
     EWPTRoot AssignedMapping;
     // Get the appropriate EWPT mapping for the assigned value.
@@ -1148,10 +1151,12 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                     if(!RootMapping.Entries.count(KeyForNewEntry)) {
                         RootMapping.Entries[KeyForNewEntry] = NewEntry;
                     } else {
+                        RootMapping.Entries[KeyForNewEntry].debugPrint(*this);
+                        NewEntry.debugPrint(*this);
                         RootMapping.Entries[KeyForNewEntry] = RootMapping.Entries[KeyForNewEntry].merge(NewEntry);
                     }
 
-                    RootMapping.Entries[KeyForNewEntry].debugPrint(*this);
+                    //RootMapping.Entries[KeyForNewEntry].debugPrint(*this);
 
                     isl_set_free(EntranceConstraints);
                 }
@@ -1327,8 +1332,8 @@ bool EWPTAliasAnalysis::runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Fr
             ////llvm::outs() << "New constraints: " << debugMappingToString(Entry.Mapping) << "\n";
         }
 
-        //llvm::outs() << "State after handling instruction " << CurrentInstruction << ":\n";
-        //debugPrintEWPTs(RetValState);
+        llvm::outs() << "State after handling instruction " << CurrentInstruction << ":\n";
+        debugPrintEWPTs(RetValState);
     }
 
     return true;
@@ -1454,6 +1459,8 @@ void SCEVAffinator::mergeParams(isl_pw_aff *&First, isl_pw_aff *&Second) {
 }
 
 __isl_give isl_pw_aff *SCEVAffinator::getPwAff(EWPTAliasAnalysis *Analysis, const SCEV *Scev, isl_ctx *Ctx) {
+  //llvm::outs() << "SCEV: " << *Scev << "\n";
+
   // TODO: initialize parameter dimension
   SCEVAffinator Affinator(Analysis);
   Affinator.Ctx = Ctx;
@@ -1591,7 +1598,7 @@ SCEVAffinator::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
 
     isl_space *Space = isl_space_set_alloc(Ctx, 0, 0);
 
-    auto LoopIndex = Expr->getLoop()->getCanonicalInductionVariable();
+    auto LoopIndex = Expr->getLoop()->getHeader();
     auto LoopIndexId = Analysis->getIslIdForValue(LoopIndex);
 
     Space = isl_space_set_alloc(Ctx, 1, 0);
