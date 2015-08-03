@@ -38,6 +38,8 @@ STATISTIC(CyclicHeapMemoryGraph, "EWPT Analysis Error: Heap memory graph has pot
 STATISTIC(CouldNotAffinateSCEV, "EWPT Analysis Error: SCEVAffinator failed on SCEV");
 STATISTIC(SuccessfulFunctionAnalysis, "EWPT Analysis Error: Function successfully analyzed");
 STATISTIC(SuccessfulRankOneEWPT, "EWPT Analysis Error: Depth two EWPT found");
+STATISTIC(LoopExitOutsideLoopHeader, "EWPT Analysis Error: Loop exit outside of loop header");
+STATISTIC(NonLoopCycle, "EWPT Analysis Error: Cycle that is not a loop as detected by LoopInfo");
 
 namespace ewpt {
 
@@ -418,6 +420,7 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
     auto BeginBlock = &(F.getEntryBlock());
     Frame.BeginBlocks.insert(BeginBlock);
     Frame.RestrictToLoop = NULL;
+    Frame.AnalyzedFunction = &F;
     if(!iterativeControlFlowAnalysis(Frame)) {
         // Ensure that no aliasing info is provided.
         Frame.BlockOutStates.clear();
@@ -425,6 +428,8 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
         SuccessfulFunctionAnalysis++;
         bool RankOneEntry = false;
         for(auto& OutStatePair : Frame.BlockOutStates) {
+            llvm::outs() << "OutState for block " << OutStatePair.first->getName() << "\n";
+            debugPrintEWPTs(OutStatePair.second);
             for(auto& RootPair : OutStatePair.second.trackedRoots) {
                 for(auto& EntryPair : RootPair.second.Entries) {
                     auto& Entry = EntryPair.second;
@@ -459,7 +464,7 @@ std::vector<EWPTAliasAnalysisState*> EWPTAliasAnalysis::getPredecessorStates(EWP
     std::vector<EWPTAliasAnalysisState*> PredecessorStates;
     if(Frame.BeginBlocks.find(Current) != Frame.BeginBlocks.end()) {
         PredecessorStates.push_back(&Frame.EntryState);
-        // TODO: figure out whether to return here or not
+        return PredecessorStates;
     }
 
     for(auto PI = pred_begin(Current), E = pred_end(Current); PI != E; PI++) {
@@ -476,31 +481,17 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
     }
     while(Frame.BlocksToProcess.size()) {
         BasicBlock *Current = Frame.BlocksToProcess.front();
+        llvm::outs() << "Handling block " << *Current << "\n";
         Frame.BlocksToProcess.pop();
 
-        //llvm::outs() << "Predecessor states:\n";
-        auto StartWithState = MergeStates(getPredecessorStates(Frame, Current));
-        if(!runOnBlock(*Current, Frame, StartWithState, Frame.BlockOutStates[Current])) {
-            return false;
-        }
+        llvm::outs() << "Loop for" << Current->getName() << ": " << LI->getLoopFor(Current) << "\n";
 
-        // Don't process the successors of an exit.
-        if(Current == Frame.Exit) {
-            continue;
-        }
-
-        //llvm::outs() << "LI->isLoopHeader(Current)" << LI->isLoopHeader(Current) << "\n";
-        //llvm::outs() << "LI " << LI << "\n";
-        if(Frame.RestrictToLoop) {
-            //llvm::outs() << "Loop: " << *Frame.RestrictToLoop;
-        }
-        //llvm::outs() << *Current << "\n";
-        //llvm::outs() << Current << "\n";
-
-        if(LI->isLoopHeader(Current)) {
+        if(LI->isLoopHeader(Current) && LI->getLoopFor(Current) != Frame.RestrictToLoop) {
             //llvm::outs() << "Previously queued: " << Frame.BlocksToProcess.size() << "\n";
             Loop* LoopToAnalyze = LI->getLoopFor(Current);
+            llvm::outs() << "Handling loop" << Current->getName() << "with header " << LI->getLoopFor(Current)->getHeader()->getName() << "(" << LI->isLoopHeader(LI->getLoopFor(Current)->getHeader()) << ")\n";
             bool Success = handleLoop(Frame, *Current, *LoopToAnalyze, Frame.BlockOutStates[Current]);
+            llvm::outs() << "Done with loop" << Current->getName() << "\n";
             if(!Success) {
                 //llvm::errs() << "Failed to handle loop\n";
                 return false;
@@ -512,13 +503,17 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
             }
             //llvm::outs() << "Pushing successors of loop header.\n";
 
-            // Only add the successors that are not part of the loop.
+            // Once we're done, process successors outside the loop.
             for(auto SI = succ_begin(Current), E = succ_end(Current); SI != E; SI++) {
                 // Check that this successor now has all requirements.
                 auto Successor = *SI;
-                // Only process the successor if it's not within the current loop.
-                if(!LoopToAnalyze->contains(Successor)) {
-                    //llvm::outs() << *Successor << "\n";
+
+                // Make sure the successor is in the current loop.
+                if(LoopToAnalyze->contains(Successor)) {
+                   continue;
+                }
+
+                if(arePredecessorsProcessed(Frame, Successor) || LI->isLoopHeader(Successor)) {
                     Frame.BlocksToProcess.push(Successor);
                 }
             }
@@ -528,19 +523,69 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
             //llvm::outs() << "Trying to process block with unprocessed predecessors.";
             return false;
         } else {
-            //llvm::outs() << "Pushing successors of regular block.\n";
+            auto StartWithState = MergeStates(getPredecessorStates(Frame, Current));
+            if(!runOnBlock(*Current, Frame, StartWithState, Frame.BlockOutStates[Current])) {
+                return false;
+            }
+
             // Once this frame is done, try processing successors
             for(auto SI = succ_begin(Current), E = succ_end(Current); SI != E; SI++) {
                 // Check that this successor now has all requirements.
                 auto Successor = *SI;
-                // Only process the successor if it's actually within the current loop.
-                if(!Frame.RestrictToLoop || Frame.RestrictToLoop->contains(Successor)) {
-                    if(arePredecessorsProcessed(Frame, Successor) || LI->isLoopHeader(Successor)) {
-                        //llvm::outs() << *Successor << "\n";
-                        Frame.BlocksToProcess.push(Successor);
+
+                // Make sure the successor is in the current loop.
+                bool LoopContainsSuccessor = !Frame.RestrictToLoop || Frame.RestrictToLoop->contains(Successor);
+                if(!LoopContainsSuccessor) {
+                    // If current is the loop header, we simply ignore "exit" edges.
+                    if(Current == Frame.RestrictToLoop->getHeader()) {
+                        continue;
+                    } else {
+                        // Otherwise we have something like a break, error
+                        LoopExitOutsideLoopHeader++;
+                        return false;
                     }
                 }
+
+                // If the successor is the loop header, it's the back edge. Ignore.
+                if(Frame.RestrictToLoop && Successor == Frame.RestrictToLoop->getHeader()) {
+                    continue;
+                }
+
+                // If the next block has already been processed, we have a non-loop cycle
+                if(Frame.BlockOutStates[Successor].trackedRoots.size()) {
+                    llvm::outs() << "Block " << Successor->getName() << " has already been processed.\n";
+                    NonLoopCycle++;
+                    return false;
+                }
+
+                // Delay processing of this successor block until all successors are processed.
+                if(arePredecessorsProcessed(Frame, Successor) || LI->isLoopHeader(Successor)) {
+                    llvm::outs() << "Pushing successor for " << Current->getName() << ": " << Successor->getName() << "\n";
+                    Frame.BlocksToProcess.push(Successor);
+                }
             }
+        }
+    }
+
+    // Make sure all blocks were processed.
+    std::vector<const BasicBlock*> Blocks;
+    if(Frame.RestrictToLoop) {
+        for(auto& Block : Frame.RestrictToLoop->getBlocks()) {
+            Blocks.push_back(Block);
+        }
+    } else {
+        for(auto& Block : Frame.AnalyzedFunction->getBasicBlockList()) {
+            Blocks.push_back(&Block);
+        }
+    }
+    for(const BasicBlock* Block : Blocks) {
+        if(!Frame.BlockOutStates.count(Block)) {
+            // The reason a block may not have been processed is that we will "delay"
+            // the processing of blocks that still have unprocessed predecessors.
+            // However, if there's a cycle, there will always be an unprocessed predecessor,
+            // and the loop will never be processed.
+            NonLoopCycle++;
+            return false;
         }
     }
 
@@ -567,6 +612,8 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
     auto EntryState = MergeStates(getPredecessorStates(SuperFrame, &LoopHeader));
 
+    std::vector<EWPTAliasAnalysisFrame> SubFrames;
+
     bool FixedPointReached = false;
     for(unsigned I = 0; I < 3; I++) {
         // Create a new analysis frame for the analysis of the loop body.
@@ -575,44 +622,32 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         SubFrame.RestrictToLoop = &LoopToAnalyze;
         SubFrame.SuperFrame = &SuperFrame;
         SubFrame.BlockOutStates = SuperFrame.BlockOutStates;
-        SubFrame.Exit = &LoopHeader;
 
-        // TODO: merge with the same check in iterativeControlFlowAnalysis()
-        for(auto SI = succ_begin(&LoopHeader), E = succ_end(&LoopHeader); SI != E; SI++) {
-            auto Successor = *SI;
-            // Only process the successor if it's actually within the current loop.
-            if(SubFrame.RestrictToLoop->contains(Successor)) {
-                if(arePredecessorsProcessed(SubFrame, Successor) || LI->isLoopHeader(Successor)) {
-                    SubFrame.BlocksToProcess.push(Successor);
-                }
-            }
-        }
+        SubFrame.BeginBlocks.insert(&LoopHeader);
 
         // Start the sub-analysis with the loop header as "exit node"
         bool Success = iterativeControlFlowAnalysis(SubFrame);
         if(!Success) {
-            //llvm::outs() << "Control flow analysis in sub-frame failed\n";
+            llvm::outs() << "Control flow analysis in sub-frame failed\n";
             return false;
         }
 
-        // Extract the out state of the loop header (later: all loop exits)
-        ExitState = SubFrame.BlockOutStates[SubFrame.Exit];
-
-        // Before aging and binding, we need to propagate all the states of the
-        // loop body blocks to the super frame.
-        for(auto& Pair : SubFrame.BlockOutStates) {
-            if(!LoopToAnalyze.contains(Pair.first)) {
+        // Extract the out state of all predecessors of the loop header that come
+        // from within the loop.
+        // TODO: this is redundant with code in getPredecessorStates
+        std::vector<EWPTAliasAnalysisState*> PredecessorStates;
+        for(auto PI = pred_begin(&LoopHeader), E = pred_end(&LoopHeader); PI != E; PI++) {
+            auto Predecessor = *PI;
+            if(!SubFrame.RestrictToLoop->contains(Predecessor)) {
                 continue;
             }
-            if(Pair.first != &LoopHeader) {
-                // Merge it into the super frame.
-                if(!SuperFrame.BlockOutStates.count(Pair.first)) {
-                    SuperFrame.BlockOutStates[Pair.first] = Pair.second;
-                } else {
-                    SuperFrame.BlockOutStates[Pair.first] = SuperFrame.BlockOutStates[Pair.first].merge(Pair.second);
-                }
-            }
+            auto& PredecessorState = SubFrame.BlockOutStates[Predecessor];
+            PredecessorStates.push_back(&PredecessorState);
         }
+        ExitState = MergeStates(PredecessorStates);
+
+        llvm::outs() << "Before aging\n";
+        debugPrintEWPTs(ExitState);
 
         // Replace "i" by "i-" for the state of the loop header
         // Add a new "i"
@@ -650,7 +685,15 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
                 Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 1, -1);
                 Constraint = isl_constraint_set_constant_si(Constraint, -1);
                 Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
+
+                // We furthermore know that 0 <= i-
+                Constraint = isl_inequality_alloc(isl_local_space_from_space(isl_map_get_space(Entry.Mapping)));
+                Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param , 1, 0);
+                Entry.Mapping = isl_map_add_constraint(Entry.Mapping, Constraint);
+
+                //llvm::outs() << "Mapping before projecting out: " << debugMappingToString(Entry.Mapping) << "\n";
                 Entry.Mapping = isl_map_project_out(Entry.Mapping, isl_dim_param, 1, 1);
+                //llvm::outs() << "Mapping after projecting out: " << debugMappingToString(Entry.Mapping) << "\n";
 
                 // Project out parameter dimensions that aren't constant, unless they're the iterator.
                 for(unsigned i = 0; i < isl_space_dim(isl_map_get_space(Entry.Mapping), isl_dim_param); i++) {
@@ -677,6 +720,9 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
             }
         }
 
+        llvm::outs() << "After aging\n";
+        debugPrintEWPTs(ExitState);
+
         if(ExitState.equals(EntryState)) {
             EntryState = ExitState;
             FixedPointReached = true;
@@ -685,6 +731,7 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
         // Do another iteration to see if we're at a fixed point yet
         EntryState = ExitState;
+        SubFrames.push_back(SubFrame);
     }
 
     if(FixedPointReached) {
@@ -701,6 +748,7 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
         isl_pw_aff *UpperBound = SCEVAffinator::getPwAff(this, UpperBoundSCEV, IslContext);
         isl_set *BoundSet = isl_map_range(isl_map_from_pw_aff(UpperBound));
+        llvm::outs() << "Upper bound set: " << debugSetToString(BoundSet) << "\n";
 
         // Add the constraint that the iterator be smaller than the upper bound.
         auto Identifier = isl_id_alloc(IslContext, IVName.c_str(), InductionVariable);
@@ -710,17 +758,16 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
         // i <= UpperBound
         auto Constraint = isl_inequality_alloc(isl_local_space_from_space(isl_set_get_space(BoundSet)));
-        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, 1);
-        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_set, 0, -1);
-        BoundSet = isl_set_add_constraint(BoundSet, Constraint);
-
-        // 0 <= i
-        Constraint = isl_inequality_alloc(isl_local_space_from_space(isl_set_get_space(BoundSet)));
         Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_param, 0, -1);
+        Constraint = isl_constraint_set_coefficient_si(Constraint, isl_dim_set, 0, 1);
+        // Add the constant 1, as we want an upper bound for the first iterator that is not executed,
+        // rather than an upper bound for the last iterator that is executed.
+        Constraint = isl_constraint_set_constant_si(Constraint, 1);
         BoundSet = isl_set_add_constraint(BoundSet, Constraint);
 
         // Project out the set dimension.
         BoundSet = isl_set_project_out(BoundSet, isl_dim_set, 0, 1);
+        llvm::outs() << "Bound set: " << debugSetToString(BoundSet) << "\n";
 
         // i must be <= UpperBound
 
@@ -731,11 +778,14 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
 
                 isl_set *BoundSetTmp = isl_set_copy(BoundSet);
                 mergeParams(BoundSetTmp, Entry.Mapping);
+                llvm::outs() << "Mapping: " << debugMappingToString(Entry.Mapping) << "\n";
                 Entry.Mapping = isl_map_intersect_params(Entry.Mapping, BoundSetTmp);
+                llvm::outs() << "Mapping 2: " << debugMappingToString(Entry.Mapping) << "\n";
 
                 // We know that the induction variable is at parameter position 0 because we aligned
                 // the UpperBoundSet that way.
                 Entry.Mapping = isl_map_project_out(Entry.Mapping, isl_dim_param, 0, 1);
+                llvm::outs() << "Mapping after: " << debugMappingToString(Entry.Mapping) << "\n";
 
                 EntryState.trackedRoots[RootPair.first].Entries[EntryPair.first] = Entry;
             }
@@ -747,12 +797,32 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         debugPrintEWPTs(EntryState);
 
         RetVal = EntryState;
+
+        // After binding, propagate the states within the loop up to the super frame.
+        // For this we merge the states of all the subframes we produced.
+        for(auto& Pair : SubFrames[0].BlockOutStates) {
+            if(!LoopToAnalyze.contains(Pair.first) || LoopToAnalyze.getHeader() == Pair.first) {
+                continue;
+            }
+
+            // Merge together all states of this subframe
+            std::vector<EWPTAliasAnalysisState*> States;
+            for(auto& SubFrame : SubFrames) {
+                States.push_back(&SubFrame.BlockOutStates[Pair.first]);
+            }
+            auto MergedState = MergeStates(States);
+
+            // Propagate it up into the super frame.
+            SuperFrame.BlockOutStates[Pair.first] = MergedState;
+        }
+
         return true;
+    } else {
+        // We did not converge after a certain amount of iterations.
+        ++LoopDidNotConverge;
+        return false;
     }
 
-    ++LoopDidNotConverge;
-    //llvm::errs() << "Did not converge.\n";
-    return false;
 }
 
 EWPTAliasAnalysisState EWPTAliasAnalysis::MergeStates(std::vector<EWPTAliasAnalysisState*> StatesToMerge) {

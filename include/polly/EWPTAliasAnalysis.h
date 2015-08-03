@@ -217,13 +217,13 @@ public:
     EWPTAliasAnalysisFrame *SuperFrame;
     std::set<llvm::BasicBlock*> BeginBlocks;
     EWPTAliasAnalysisState EntryState;
-    llvm::BasicBlock *Exit;
     llvm::Loop *RestrictToLoop;
-    std::map<llvm::BasicBlock*, EWPTAliasAnalysisState> BlockOutStates;
+    const llvm::Function *AnalyzedFunction;
+    std::map<const llvm::BasicBlock*, EWPTAliasAnalysisState> BlockOutStates;
     std::queue<llvm::BasicBlock*> BlocksToProcess;
 
     EWPTAliasAnalysisFrame() :
-        SuperFrame(NULL), Exit(NULL), RestrictToLoop(NULL)
+        SuperFrame(NULL), RestrictToLoop(NULL)
     { };
 
     std::vector<llvm::Value*> GetCurrentLoopIterators();
