@@ -751,6 +751,9 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         }
 
         isl_pw_aff *UpperBound = SCEVAffinator::getPwAff(this, UpperBoundSCEV, IslContext);
+        if(!UpperBound) {
+            return false;
+        }
         isl_set *BoundSet = isl_map_range(isl_map_from_pw_aff(UpperBound));
         llvm::outs() << "Upper bound set: " << debugSetToString(BoundSet) << "\n";
 
