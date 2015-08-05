@@ -37,6 +37,7 @@ STATISTIC(WriteToAny, "EWPT Analysis Error: Potential write to ANY heap object")
 STATISTIC(CyclicHeapMemoryGraph, "EWPT Analysis Error: Heap memory graph has potential cycles");
 STATISTIC(CouldNotAffinateSCEV, "EWPT Analysis Error: SCEVAffinator failed on SCEV");
 STATISTIC(SuccessfulFunctionAnalysis, "EWPT Analysis Error: Function successfully analyzed");
+STATISTIC(FailedFunctionAnalysis, "EWPT Analysis Error: Function analysis failed");
 STATISTIC(SuccessfulRankOneEWPT, "EWPT Analysis Error: Depth two EWPT found");
 STATISTIC(LoopExitOutsideLoopHeader, "EWPT Analysis Error: Loop exit outside of loop header");
 STATISTIC(NonLoopCycle, "EWPT Analysis Error: Cycle that is not a loop as detected by LoopInfo");
@@ -423,6 +424,7 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
     Frame.AnalyzedFunction = &F;
     if(!iterativeControlFlowAnalysis(Frame)) {
         // Ensure that no aliasing info is provided.
+        FailedFunctionAnalysis++;
         Frame.BlockOutStates.clear();
     } else {
         SuccessfulFunctionAnalysis++;
@@ -521,6 +523,7 @@ bool EWPTAliasAnalysis::iterativeControlFlowAnalysis(EWPTAliasAnalysisFrame& Fra
             continue;
         } else if(!arePredecessorsProcessed(Frame, Current)) {
             //llvm::outs() << "Trying to process block with unprocessed predecessors.";
+            NonLoopCycle++;
             return false;
         } else {
             auto StartWithState = MergeStates(getPredecessorStates(Frame, Current));
@@ -743,6 +746,7 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         // Compute a set containing the upper bound as single point.
         const SCEV *UpperBoundSCEV = SE->getBackedgeTakenCount(&LoopToAnalyze);
         if(isa<llvm::SCEVCouldNotCompute>(UpperBoundSCEV)) {
+            CouldNotAffinateSCEV++;
             return false;
         }
 
@@ -1093,7 +1097,8 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
     // Get all EWPT entries of depth 0.
     std::vector<EWPTEntry> ModifiedHeapObjects;
     if(!State.trackedRoots.count(BasePointerValue)) {
-        return false; // TODO: error handling
+        WriteToAny++;
+        return false;
     }
     for(auto& EntryPair : State.trackedRoots[BasePointerValue].Entries) {
         auto& Entry = EntryPair.second;
