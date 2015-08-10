@@ -407,15 +407,13 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
 
     InitializeAliasAnalysis(this, DL);
 
-    /*
-     * Print all SCEVs in function.
       for(auto& Block : F) {
         for(auto& Value : Block) {
             if(SE->isSCEVable(Value.getType())) {
                 llvm::outs() << "SCEV: " << *SE->getSCEV(&Value) << "\n";
             }
         }
-    }*/
+    }
 
     // The actual analysis.
     auto BeginBlock = &(F.getEntryBlock());
@@ -437,6 +435,10 @@ bool EWPTAliasAnalysis::runOnFunction(Function &F)
                     auto& Entry = EntryPair.second;
                     if(Entry.Rank >= 1) {
                         RankOneEntry = true;
+                        llvm::outs() << "Rank one EWPT:\n";
+                        debugPrintEWPTs(OutStatePair.second);
+                        llvm::outs() << "In Function:\n";
+                        llvm::outs() << F;
                     }
                 }
             }
