@@ -79,6 +79,7 @@ struct HeapNameId {
         UNALIGNED_STORE,
         NON_LINEAR_LOAD,
         NON_POINTER_LOAD,
+        FUNCTION_CALL,
         PARAMETER,
         VALUE_NOT_ANALYZED,
         UNKNOWN_OPERATION

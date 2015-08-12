@@ -47,6 +47,7 @@ STATISTIC(AnySource_UNALIGNED_STORE, "EWPT Analysis: Source of Any - UNALIGNED_S
 STATISTIC(AnySource_NON_LINEAR_LOAD, "EWPT Analysis: Source of Any - NON_LINEAR_LOAD");
 STATISTIC(AnySource_NON_POINTER_LOAD, "EWPT Analysis: Source of Any - NON_POINTER_LOAD");
 STATISTIC(AnySource_PARAMETER, "EWPT Analysis: Source of Any - PARAMETER");
+STATISTIC(AnySource_CALL, "EWPT Analysis: Source of Any - CALL");
 STATISTIC(AnySource_VALUE_NOT_ANALYZED, "EWPT Analysis: Source of Any - VALUE_NOT_ANALYZED");
 STATISTIC(AnySource_UNKNOWN_OPERATION, "EWPT Analysis: Source of Any - UNKNOWN_OPERATION");
 
@@ -69,6 +70,9 @@ void IncrementStatisticForAnySource(HeapNameId::AnyReason Source) {
     case HeapNameId::PARAMETER:
         AnySource_PARAMETER++;
         break;
+    case HeapNameId::FUNCTION_CALL:
+        AnySource_CALL++;
+        break;
     case HeapNameId::VALUE_NOT_ANALYZED:
         AnySource_VALUE_NOT_ANALYZED++;
         break;
@@ -80,6 +84,22 @@ void IncrementStatisticForAnySource(HeapNameId::AnyReason Source) {
 
 bool instructionIsHandled(Instruction *Instr) {
     return llvm::dyn_cast<llvm::LoadInst>(Instr) || llvm::dyn_cast<llvm::StoreInst>(Instr) || llvm::dyn_cast<llvm::PHINode>(Instr) || llvm::isNoAliasCall(Instr);
+}
+
+void handleStatisticsForBasePointerValue(llvm::Value *BasePointerValue) {
+    if(isa<Argument>(BasePointerValue)) {
+        AnySource_PARAMETER++;
+    } else if(isa<llvm::CallInst>(BasePointerValue)) {
+        AnySource_CALL++;
+    } else if(!isa<llvm::Instruction>(BasePointerValue) || !instructionIsHandled(dyn_cast<Instruction>(BasePointerValue))) {
+        AnySource_UNKNOWN_OPERATION++;
+        llvm::outs() << "Unknown operation " << "\n";
+        llvm::outs() << *BasePointerValue << "\n";
+    } else {
+        AnySource_VALUE_NOT_ANALYZED++;
+        llvm::outs() << "Value not analyzed " << "\n";
+        llvm::outs() << *BasePointerValue << "\n";
+    }
 }
 
 // ============================
@@ -1149,15 +1169,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
     std::vector<EWPTEntry> ModifiedHeapObjects;
     if(!State.trackedRoots.count(BasePointerValue)) {
         WriteToAny++;
-        if(isa<Argument>(BasePointerValue)) {
-            AnySource_PARAMETER++;
-        } else if(!isa<llvm::Instruction>(BasePointerValue) || !instructionIsHandled(dyn_cast<Instruction>(BasePointerValue))) {
-            AnySource_UNKNOWN_OPERATION++;
-            llvm::outs() << "Unknown operation " << "\n";
-            llvm::outs() << *BasePointerValue << "\n";
-        } else {
-            AnySource_VALUE_NOT_ANALYZED++;
-        }
+        handleStatisticsForBasePointerValue(BasePointerValue);
         return false;
     }
     for(auto& EntryPair : State.trackedRoots[BasePointerValue].Entries) {
@@ -1366,12 +1378,16 @@ bool EWPTAliasAnalysis::getEWPTForValue(EWPTAliasAnalysisState& State, Value *Po
     // No valid EWPT found, return an EWPT that can point to any value.
     if(isa<llvm::Argument>(PointerValBase)) {
         RetVal = EWPTRoot::Any(*this, HeapNameId::PARAMETER);
+    } else if(isa<llvm::CallInst>(PointerValBase)) {
+        RetVal = EWPTRoot::Any(*this, HeapNameId::FUNCTION_CALL);
     } else if(!isa<llvm::Instruction>(PointerValBase) || !instructionIsHandled(dyn_cast<Instruction>(PointerValBase))) {
         RetVal = EWPTRoot::Any(*this, HeapNameId::UNKNOWN_OPERATION);
         llvm::outs() << "Unknown operation " << "\n";
         llvm::outs() << *PointerValBase << "\n";
     } else {
         RetVal = EWPTRoot::Any(*this, HeapNameId::VALUE_NOT_ANALYZED);
+        llvm::outs() << "Value not analyzed" << "\n";
+        llvm::outs() << *PointerValBase << "\n";
     }
 
     return false;
