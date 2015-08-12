@@ -1151,6 +1151,8 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
         WriteToAny++;
         if(isa<Argument>(BasePointerValue)) {
             AnySource_PARAMETER++;
+        } else if(!isa<llvm::Instruction>(BasePointerValue) || !instructionIsHandled(dyn_cast<Instruction>(BasePointerValue))) {
+            AnySource_UNKNOWN_OPERATION++;
         } else {
             AnySource_VALUE_NOT_ANALYZED++;
         }
