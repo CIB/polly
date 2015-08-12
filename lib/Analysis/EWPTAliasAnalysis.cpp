@@ -99,6 +99,7 @@ void handleStatisticsForBasePointerValue(llvm::Value *BasePointerValue) {
         AnySource_VALUE_NOT_ANALYZED++;
         llvm::outs() << "Value not analyzed " << "\n";
         llvm::outs() << *BasePointerValue << "\n";
+        llvm::outs() << *(dyn_cast<Instruction>(BasePointerValue))->getParent() << "\n";
     }
 }
 
@@ -1388,6 +1389,7 @@ bool EWPTAliasAnalysis::getEWPTForValue(EWPTAliasAnalysisState& State, Value *Po
         RetVal = EWPTRoot::Any(*this, HeapNameId::VALUE_NOT_ANALYZED);
         llvm::outs() << "Value not analyzed" << "\n";
         llvm::outs() << *PointerValBase << "\n";
+        llvm::outs() << *(dyn_cast<Instruction>(PointerValBase))->getParent() << "\n";
     }
 
     return false;
