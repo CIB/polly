@@ -71,6 +71,21 @@ struct HeapNameId {
         MALLOC
     };
 
+    /** Only for type Any heap name ID's.
+     *  Stores how this any heap name was generated.
+     */
+    enum AnyReason {
+        NON_ZERO_CONSTANT,
+        UNALIGNED_STORE,
+        NON_LINEAR_LOAD,
+        NON_POINTER_LOAD,
+        PARAMETER,
+        VALUE_NOT_ANALYZED,
+        UNKNOWN_OPERATION
+    };
+
+    AnyReason ReasonForAny;
+
     Type hasType;
     llvm::Value *SourceLocation;
 
@@ -81,10 +96,11 @@ struct HeapNameId {
         return RetVal;
     }
 
-    static HeapNameId getAny() {
+    static HeapNameId getAny(AnyReason Reason) {
         HeapNameId RetVal;
         RetVal.hasType = ANY;
         RetVal.SourceLocation = nullptr;
+        RetVal.ReasonForAny = Reason;
         return RetVal;
     }
 
@@ -99,7 +115,7 @@ struct HeapNameId {
         if(hasType == ZERO) {
             return "NULL";
         } else if(hasType == ANY) {
-            return "ANY";
+            return "ANY (" + std::to_string(ReasonForAny) + ")";
         } else {
             std::string RetVal;
             raw_string_ostream Stream(RetVal);
@@ -167,7 +183,7 @@ public:
 
     EWPTEntry intersect(EWPTEntry& Other);
 
-    static EWPTEntry getAny(const EWPTAliasAnalysis& Analysis);
+    static EWPTEntry getAny(const EWPTAliasAnalysis& Analysis, HeapNameId::AnyReason Reason);
     static EWPTEntry getNull(const EWPTAliasAnalysis& Analysis);
 
     bool isSingleValued();
@@ -198,7 +214,7 @@ public:
 
     void debugPrint(EWPTAliasAnalysis& Analysis);
 
-    static EWPTRoot Any(const EWPTAliasAnalysis& Analysis);
+    static EWPTRoot Any(const EWPTAliasAnalysis& Analysis, HeapNameId::AnyReason Reason);
     static EWPTRoot Null(const EWPTAliasAnalysis& Analysis);
 };
 

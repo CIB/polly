@@ -30,19 +30,57 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "ewpt"
-STATISTIC(TooManyLoopBackEdges, "EWPT Analysis Error: Too many loop back edges");
-STATISTIC(LoopDidNotConverge, "EWPT Analysis Error: Loop did not converge");
-STATISTIC(NoScevForBasePointer, "EWPT Analysis Error: Could not convert base pointer for store to known SCEV");
-STATISTIC(WriteToAny, "EWPT Analysis Error: Potential write to ANY heap object");
-STATISTIC(CyclicHeapMemoryGraph, "EWPT Analysis Error: Heap memory graph has potential cycles");
-STATISTIC(CouldNotAffinateSCEV, "EWPT Analysis Error: SCEVAffinator failed on SCEV");
-STATISTIC(SuccessfulFunctionAnalysis, "EWPT Analysis Error: Function successfully analyzed");
-STATISTIC(FailedFunctionAnalysis, "EWPT Analysis Error: Function analysis failed");
-STATISTIC(SuccessfulRankOneEWPT, "EWPT Analysis Error: Depth two EWPT found");
-STATISTIC(LoopExitOutsideLoopHeader, "EWPT Analysis Error: Loop exit outside of loop header");
-STATISTIC(NonLoopCycle, "EWPT Analysis Error: Cycle that is not a loop as detected by LoopInfo");
+STATISTIC(TooManyLoopBackEdges, "EWPT Analysis: Too many loop back edges");
+STATISTIC(LoopDidNotConverge, "EWPT Analysis: Loop did not converge");
+STATISTIC(NoScevForBasePointer, "EWPT Analysis: Could not convert base pointer for store to known SCEV");
+STATISTIC(WriteToAny, "EWPT Analysis: Potential write to ANY heap object");
+STATISTIC(CyclicHeapMemoryGraph, "EWPT Analysis: Heap memory graph has potential cycles");
+STATISTIC(CouldNotAffinateSCEV, "EWPT Analysis: SCEVAffinator failed on SCEV");
+STATISTIC(SuccessfulFunctionAnalysis, "EWPT Analysis: Function successfully analyzed");
+STATISTIC(FailedFunctionAnalysis, "EWPT Analysis: Function analysis failed");
+STATISTIC(SuccessfulRankOneEWPT, "EWPT Analysis: Depth two EWPT found");
+STATISTIC(LoopExitOutsideLoopHeader, "EWPT Analysis: Loop exit outside of loop header");
+STATISTIC(NonLoopCycle, "EWPT Analysis: Cycle that is not a loop as detected by LoopInfo");
+
+STATISTIC(AnySource_NON_ZERO_CONSTANT, "EWPT Analysis: Source of Any - NON_ZERO_CONSTANT");
+STATISTIC(AnySource_UNALIGNED_STORE, "EWPT Analysis: Source of Any - UNALIGNED_STORE");
+STATISTIC(AnySource_NON_LINEAR_LOAD, "EWPT Analysis: Source of Any - NON_LINEAR_LOAD");
+STATISTIC(AnySource_NON_POINTER_LOAD, "EWPT Analysis: Source of Any - NON_POINTER_LOAD");
+STATISTIC(AnySource_PARAMETER, "EWPT Analysis: Source of Any - PARAMETER");
+STATISTIC(AnySource_VALUE_NOT_ANALYZED, "EWPT Analysis: Source of Any - VALUE_NOT_ANALYZED");
+STATISTIC(AnySource_UNKNOWN_OPERATION, "EWPT Analysis: Source of Any - UNKNOWN_OPERATION");
 
 namespace ewpt {
+
+void IncrementStatisticForAnySource(HeapNameId::AnyReason Source) {
+    switch(Source) {
+    case HeapNameId::NON_ZERO_CONSTANT:
+        AnySource_NON_ZERO_CONSTANT++;
+        break;
+    case HeapNameId::UNALIGNED_STORE:
+        AnySource_UNALIGNED_STORE++;
+        break;
+    case HeapNameId::NON_LINEAR_LOAD:
+        AnySource_NON_LINEAR_LOAD++;
+        break;
+    case HeapNameId::NON_POINTER_LOAD:
+        AnySource_NON_POINTER_LOAD++;
+        break;
+    case HeapNameId::PARAMETER:
+        AnySource_PARAMETER++;
+        break;
+    case HeapNameId::VALUE_NOT_ANALYZED:
+        AnySource_VALUE_NOT_ANALYZED++;
+        break;
+    case HeapNameId::UNKNOWN_OPERATION:
+        AnySource_UNKNOWN_OPERATION++;
+        break;
+    }
+}
+
+bool instructionIsHandled(Instruction *Instr) {
+    return llvm::dyn_cast<llvm::LoadInst>(Instr) || llvm::dyn_cast<llvm::StoreInst>(Instr) || llvm::dyn_cast<llvm::PHINode>(Instr) || llvm::isNoAliasCall(Instr);
+}
 
 // ============================
 // HeapNameId
@@ -139,12 +177,18 @@ bool EWPTEntry::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV* Subscrip
 bool EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript, EWPTAliasAnalysisFrame &Frame, EWPTAliasAnalysisState& State) {
     // We need to substitute and project out the first parameter in the input dimension.
 
+    if(HeapIdentifier.hasType == HeapNameId::ANY) {
+        *this = EWPTEntry::getAny(Analysis, HeapIdentifier.ReasonForAny);
+        return true;
+    }
+
     //llvm::outs() << "Attempting to apply subscript " << *Subscript << " to "; this->debugPrint(Analysis); //llvm::outs() << "\n";
 
     bool IsPointerAligned;
     isl_pw_aff *SubscriptAff = Analysis.getSubscriptSetForOffset(Subscript, Analysis.DL->getPointerSize(), IsPointerAligned);
     if(!SubscriptAff || !IsPointerAligned) {
-        return false;
+        *this = EWPTEntry::getAny(Analysis, HeapIdentifier.NON_LINEAR_LOAD);
+        return true;
     }
     isl_set *SubscriptSet = isl_map_range(isl_map_from_pw_aff(SubscriptAff));
 
@@ -160,6 +204,10 @@ bool EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
     //llvm::outs() << "Subscript set: " << Analysis.debugSetToString(SubscriptSet) << "\n";
     Analysis.mergeParams(SubscriptSet, Mapping);
     Mapping = isl_map_intersect_domain(Mapping, SubscriptSet);
+
+    if(isl_set_is_empty(isl_map_domain(Mapping))) {
+        return false;
+    }
 
     // Project out the first input dimension.
     Mapping = isl_map_project_out(Mapping, isl_dim_in, 0, 1);
@@ -182,11 +230,11 @@ bool EWPTEntry::isSingleValued() {
     return isl_map_is_single_valued(Mapping);
 }
 
-EWPTEntry EWPTEntry::getAny(const EWPTAliasAnalysis& Analysis) {
+EWPTEntry EWPTEntry::getAny(const EWPTAliasAnalysis& Analysis, HeapNameId::AnyReason Reason) {
     auto EmptySpace = isl_space_alloc(Analysis.IslContext, 0, 0, 0);
 
     EWPTEntry Entry;
-    Entry.HeapIdentifier = HeapNameId::getAny();
+    Entry.HeapIdentifier = HeapNameId::getAny(Reason);
     Entry.AmountOfIterators = 0;
     Entry.Rank = 0;
     Entry.Mapping = isl_map_universe(EmptySpace);
@@ -210,11 +258,11 @@ EWPTEntry EWPTEntry::getNull(const EWPTAliasAnalysis& Analysis) {
 // EWPTRoot
 // ==============================
 
-EWPTRoot EWPTRoot::Any(const EWPTAliasAnalysis& Analysis) {
-    EWPTEntry Entry = EWPTEntry::getAny(Analysis);
+EWPTRoot EWPTRoot::Any(const EWPTAliasAnalysis& Analysis, HeapNameId::AnyReason Reason) {
+    EWPTEntry Entry = EWPTEntry::getAny(Analysis, Reason);
 
     EWPTRoot RetVal = EWPTRoot();
-    auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getAny());
+    auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getAny(Reason));
     RetVal.Entries[Key] = Entry;
 
     return RetVal;
@@ -241,8 +289,6 @@ bool EWPTRoot::ApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *Subscript
             bool Success = Entry.ApplySubscript(Analysis, Subscript, Frame, State, Result);
             if(Success) {
                 RetVal.Entries[NewKey] = Result;
-            } else {
-                return false;
             }
         }
     }
@@ -1103,6 +1149,11 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
     std::vector<EWPTEntry> ModifiedHeapObjects;
     if(!State.trackedRoots.count(BasePointerValue)) {
         WriteToAny++;
+        if(isa<Argument>(BasePointerValue)) {
+            AnySource_PARAMETER++;
+        } else {
+            AnySource_VALUE_NOT_ANALYZED++;
+        }
         return false;
     }
     for(auto& EntryPair : State.trackedRoots[BasePointerValue].Entries) {
@@ -1127,6 +1178,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
         if(ModifiedHeapObject.HeapIdentifier.hasType == HeapNameId::ANY) {
             // We're assigning to ANY. Abort the analysis.
             WriteToAny++;
+            IncrementStatisticForAnySource(ModifiedHeapObject.HeapIdentifier.ReasonForAny);
             //llvm::errs() << "Aborting analysis because of potential write to ANY.\n";
             return false;
         }
@@ -1202,7 +1254,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                         SubscriptSet = isl_set_project_out(SubscriptSet, isl_dim_param, 0, 1);
                         llvm::outs() << "subscript set: " << debugSetToString(SubscriptSet) << "\n";
 
-                        EWPTEntry AnyEntry = EWPTEntry::getAny(*this);
+                        EWPTEntry AnyEntry = EWPTEntry::getAny(*this, HeapNameId::UNALIGNED_STORE);
 
                         if(!generateEntryFromHeapAssignment(PossibleAlias.Rank, isl_set_copy(EntranceConstraints), AnyEntry, SubscriptSet, NewEntry)) {
                             return false;
@@ -1251,7 +1303,7 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
     ////llvm::outs() << "Handling Load\n";
 
     if(!CurrentLoadInst->getPointerOperand()->getType()->isPointerTy()) {
-        State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this);
+        State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this, HeapNameId::NON_POINTER_LOAD);
         return true;
     }
 
@@ -1259,14 +1311,14 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
     auto BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
 
     if (!BasePointer) {
-        State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this);
+        State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this, HeapNameId::NON_LINEAR_LOAD);
         return true;
     }
 
     auto BaseValue = BasePointer->getValue();
 
     if (isa<UndefValue>(BaseValue)) {
-        State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this);
+        State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this, HeapNameId::NON_LINEAR_LOAD);
         return true;
     }
 
@@ -1278,10 +1330,7 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
 
         // We're indexing into the loaded EWPT, so apply a subscript
         EWPTRoot NewRoot;
-        if(!LoadedFrom.ApplySubscript(*this, Offset, Frame, State, NewRoot)) {
-            State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this);
-            return true;
-        }
+        LoadedFrom.ApplySubscript(*this, Offset, Frame, State, NewRoot);
         State.trackedRoots[CurrentLoadInst] = NewRoot;
     }
 
@@ -1311,7 +1360,13 @@ bool EWPTAliasAnalysis::getEWPTForValue(EWPTAliasAnalysisState& State, Value *Po
     }
 
     // No valid EWPT found, return an EWPT that can point to any value.
-    RetVal = EWPTRoot::Any(*this);
+    if(isa<llvm::Argument>(PointerValBase)) {
+        RetVal = EWPTRoot::Any(*this, HeapNameId::PARAMETER);
+    } else if(!isa<llvm::Instruction>(PointerValBase) || !instructionIsHandled(dyn_cast<Instruction>(PointerValBase))) {
+        RetVal = EWPTRoot::Any(*this, HeapNameId::UNKNOWN_OPERATION);
+    } else {
+        RetVal = EWPTRoot::Any(*this, HeapNameId::VALUE_NOT_ANALYZED);
+    }
 
     return false;
 }
@@ -1354,14 +1409,7 @@ bool EWPTAliasAnalysis::runOnBlock(BasicBlock &block, EWPTAliasAnalysisFrame& Fr
                     }
                 }
                 EWPTRoot Root;
-                bool Success = this->getEWPTForValue(RetValState, IncomingValue, Root);
-                if(!Success) {
-                    EWPTEntry Entry = EWPTEntry::getAny(*this);
-
-                    Root = EWPTRoot();
-                    auto Key = std::make_pair<unsigned, HeapNameId>(0, HeapNameId::getAny());
-                    Root.Entries[Key] = Entry;
-                }
+                this->getEWPTForValue(RetValState, IncomingValue, Root);
                 RootsToMerge.push_back(Root);
             }
             EWPTRoot NewRoot = MergeRoots(RootsToMerge);
@@ -1438,10 +1486,6 @@ void *EWPTAliasAnalysis::getAdjustedAnalysisPointer(const void *ID)
 
 isl_ctx *EWPTAliasAnalysis::getIslContext() {
     return IslContext;
-}
-
-bool instructionIsHandled(Instruction *Instr) {
-    return llvm::dyn_cast<llvm::LoadInst>(Instr) || llvm::dyn_cast<llvm::StoreInst>(Instr) || llvm::dyn_cast<llvm::PHINode>(Instr) || llvm::isNoAliasCall(Instr);
 }
 
 AliasResult EWPTAliasAnalysis::alias(const MemoryLocation& LocA, const MemoryLocation& LocB) {
