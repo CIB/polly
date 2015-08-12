@@ -199,6 +199,7 @@ bool EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
     // We need to substitute and project out the first parameter in the input dimension.
 
     if(HeapIdentifier.hasType == HeapNameId::ANY) {
+        llvm::outs() << "Based on ANY.\n";
         *this = EWPTEntry::getAny(Analysis, HeapIdentifier.ReasonForAny);
         return true;
     }
@@ -208,6 +209,7 @@ bool EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
     bool IsPointerAligned;
     isl_pw_aff *SubscriptAff = Analysis.getSubscriptSetForOffset(Subscript, Analysis.DL->getPointerSize(), IsPointerAligned);
     if(!SubscriptAff || !IsPointerAligned) {
+        llvm::outs() << "No aligned SCEV.\n";
         *this = EWPTEntry::getAny(Analysis, HeapIdentifier.NON_LINEAR_LOAD);
         return true;
     }
@@ -222,17 +224,22 @@ bool EWPTEntry::InternalApplySubscript(EWPTAliasAnalysis& Analysis, const SCEV *
     auto EmbedderMapping = Analysis.constructEmbedderMapping(1, Rank, 0);
     SubscriptSet = isl_set_apply(SubscriptSet, EmbedderMapping);
 
-    //llvm::outs() << "Subscript set: " << Analysis.debugSetToString(SubscriptSet) << "\n";
     Analysis.mergeParams(SubscriptSet, Mapping);
+    //llvm::outs() << "Mapping before intersection " << Analysis.debugMappingToString(Mapping) << "\n";
+    //llvm::outs() << "Subscript set: " << Analysis.debugSetToString(SubscriptSet) << "\n";
     Mapping = isl_map_intersect_domain(Mapping, SubscriptSet);
+    //llvm::outs() << "Mapping after intersection " << Analysis.debugMappingToString(Mapping) << "\n";
 
-    if(isl_set_is_empty(isl_map_domain(Mapping))) {
+    if(isl_set_is_empty(isl_map_domain(isl_map_copy(Mapping)))) {
+        llvm::outs() << "Domain is empty.\n";
         return false;
     }
 
     // Project out the first input dimension.
     Mapping = isl_map_project_out(Mapping, isl_dim_in, 0, 1);
     Rank = Rank - 1;
+
+    llvm::outs() << "After subscript applicaiton: " << Analysis.debugMappingToString(Mapping) << "\n";
 
     //llvm::outs() << "After subscript application: "; this->debugPrint(Analysis); //llvm::outs() << "\n";
 
