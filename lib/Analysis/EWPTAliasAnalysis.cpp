@@ -1153,6 +1153,8 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
             AnySource_PARAMETER++;
         } else if(!isa<llvm::Instruction>(BasePointerValue) || !instructionIsHandled(dyn_cast<Instruction>(BasePointerValue))) {
             AnySource_UNKNOWN_OPERATION++;
+            llvm::outs() << "Unknown operation " << "\n";
+            llvm::outs() << *BasePointerValue << "\n";
         } else {
             AnySource_VALUE_NOT_ANALYZED++;
         }
@@ -1366,6 +1368,8 @@ bool EWPTAliasAnalysis::getEWPTForValue(EWPTAliasAnalysisState& State, Value *Po
         RetVal = EWPTRoot::Any(*this, HeapNameId::PARAMETER);
     } else if(!isa<llvm::Instruction>(PointerValBase) || !instructionIsHandled(dyn_cast<Instruction>(PointerValBase))) {
         RetVal = EWPTRoot::Any(*this, HeapNameId::UNKNOWN_OPERATION);
+        llvm::outs() << "Unknown operation " << "\n";
+        llvm::outs() << *PointerValBase << "\n";
     } else {
         RetVal = EWPTRoot::Any(*this, HeapNameId::VALUE_NOT_ANALYZED);
     }
