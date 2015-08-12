@@ -86,20 +86,20 @@ bool instructionIsHandled(Instruction *Instr) {
     return llvm::dyn_cast<llvm::LoadInst>(Instr) || llvm::dyn_cast<llvm::StoreInst>(Instr) || llvm::dyn_cast<llvm::PHINode>(Instr) || llvm::isNoAliasCall(Instr);
 }
 
-void handleStatisticsForBasePointerValue(llvm::Value *BasePointerValue) {
+HeapNameId::AnyReason handleStatisticsForBasePointerValue(llvm::Value *BasePointerValue) {
     if(isa<Argument>(BasePointerValue)) {
-        AnySource_PARAMETER++;
+        return HeapNameId::PARAMETER;
     } else if(isa<llvm::CallInst>(BasePointerValue)) {
-        AnySource_CALL++;
+        return HeapNameId::FUNCTION_CALL;
     } else if(!isa<llvm::Instruction>(BasePointerValue) || !instructionIsHandled(dyn_cast<Instruction>(BasePointerValue))) {
-        AnySource_UNKNOWN_OPERATION++;
         llvm::outs() << "Unknown operation " << "\n";
         llvm::outs() << *BasePointerValue << "\n";
+        return HeapNameId::UNKNOWN_OPERATION;
     } else {
-        AnySource_VALUE_NOT_ANALYZED++;
         llvm::outs() << "Value not analyzed " << "\n";
         llvm::outs() << *BasePointerValue << "\n";
         llvm::outs() << *(dyn_cast<Instruction>(BasePointerValue))->getParent() << "\n";
+        return HeapNameId::VALUE_NOT_ANALYZED;
     }
 }
 
@@ -1170,7 +1170,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
     std::vector<EWPTEntry> ModifiedHeapObjects;
     if(!State.trackedRoots.count(BasePointerValue)) {
         WriteToAny++;
-        handleStatisticsForBasePointerValue(BasePointerValue);
+        IncrementStatisticForAnySource(handleStatisticsForBasePointerValue(BasePointerValue));
         return false;
     }
     for(auto& EntryPair : State.trackedRoots[BasePointerValue].Entries) {
@@ -1349,6 +1349,8 @@ bool EWPTAliasAnalysis::handleLoad(LoadInst *CurrentLoadInst, EWPTAliasAnalysisF
         EWPTRoot NewRoot;
         LoadedFrom.ApplySubscript(*this, Offset, Frame, State, NewRoot);
         State.trackedRoots[CurrentLoadInst] = NewRoot;
+    } else {
+        State.trackedRoots[CurrentLoadInst] = EWPTRoot::Any(*this, handleStatisticsForBasePointerValue(BaseValue));
     }
 
     return true;
@@ -1377,20 +1379,7 @@ bool EWPTAliasAnalysis::getEWPTForValue(EWPTAliasAnalysisState& State, Value *Po
     }
 
     // No valid EWPT found, return an EWPT that can point to any value.
-    if(isa<llvm::Argument>(PointerValBase)) {
-        RetVal = EWPTRoot::Any(*this, HeapNameId::PARAMETER);
-    } else if(isa<llvm::CallInst>(PointerValBase)) {
-        RetVal = EWPTRoot::Any(*this, HeapNameId::FUNCTION_CALL);
-    } else if(!isa<llvm::Instruction>(PointerValBase) || !instructionIsHandled(dyn_cast<Instruction>(PointerValBase))) {
-        RetVal = EWPTRoot::Any(*this, HeapNameId::UNKNOWN_OPERATION);
-        llvm::outs() << "Unknown operation " << "\n";
-        llvm::outs() << *PointerValBase << "\n";
-    } else {
-        RetVal = EWPTRoot::Any(*this, HeapNameId::VALUE_NOT_ANALYZED);
-        llvm::outs() << "Value not analyzed" << "\n";
-        llvm::outs() << *PointerValBase << "\n";
-        llvm::outs() << *(dyn_cast<Instruction>(PointerValBase))->getParent() << "\n";
-    }
+    RetVal = EWPTRoot::Any(*this, handleStatisticsForBasePointerValue(PointerValBase));
 
     return false;
 }
