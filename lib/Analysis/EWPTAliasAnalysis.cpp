@@ -822,6 +822,7 @@ bool EWPTAliasAnalysis::handleLoop(EWPTAliasAnalysisFrame& SuperFrame, BasicBloc
         // Compute a set containing the upper bound as single point.
         const SCEV *UpperBoundSCEV = SE->getBackedgeTakenCount(&LoopToAnalyze);
         if(isa<llvm::SCEVCouldNotCompute>(UpperBoundSCEV)) {
+            llvm::outs() << "CouldNotAffinateSCEV:" << *UpperBoundSCEV << "\n";
             CouldNotAffinateSCEV++;
             return false;
         }
@@ -1608,6 +1609,7 @@ __isl_give isl_pw_aff *SCEVAffinator::getPwAff(EWPTAliasAnalysis *Analysis, cons
   Affinator.Ctx = Ctx;
   auto RetVal = Affinator.visit(Scev);
   if(Affinator.Failed) {
+      llvm::outs() << "CouldNotAffinateSCEV:" << *Scev << "\n";
       CouldNotAffinateSCEV++;
       return nullptr;
   } else {
