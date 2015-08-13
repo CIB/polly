@@ -1254,7 +1254,7 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                     auto DivisionMapping = isl_map_read_from_str(IslContext, consString.c_str());
                     SubscriptSet = isl_set_apply(SubscriptSet, DivisionMapping);
 
-                    EWPTEntry NewEntry;
+                    EWPTRoot NewRoot;
 
                     // Check if we're storing to an aligned position.
                     if(!AccessIsPointerAligned) {
@@ -1280,11 +1280,14 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
 
                         EWPTEntry AnyEntry = EWPTEntry::getAny(*this, HeapNameId::UNALIGNED_STORE);
 
+                        EWPTEntry NewEntry;
                         if(!generateEntryFromHeapAssignment(PossibleAlias.Rank, isl_set_copy(EntranceConstraints), AnyEntry, SubscriptSet, NewEntry)) {
                             return false;
                         }
 
                         NewEntry.debugPrint(*this);
+                        auto KeyForNewEntry = std::make_pair(NewEntry.Rank, NewEntry.HeapIdentifier);
+                        NewRoot.Entries[KeyForNewEntry] = NewEntry;
                     } else {
                         for(auto& TailMappingPair : AssignedMapping.Entries) {
                             auto& TailMapping = TailMappingPair.second;
@@ -1297,22 +1300,17 @@ bool EWPTAliasAnalysis::handleHeapAssignment(StoreInst *AssigningInstruction, EW
                                 return false;
                             }
 
+                            EWPTEntry NewEntry;
                             if(!generateEntryFromHeapAssignment(PossibleAlias.Rank, isl_set_copy(EntranceConstraints), TailMapping, SubscriptSet, NewEntry)) {
                                 return false;
                             }
+
+                            auto KeyForNewEntry = std::make_pair(NewEntry.Rank, NewEntry.HeapIdentifier);
+                            NewRoot.Entries[KeyForNewEntry] = NewEntry;
                         }
                     }
 
-                    auto KeyForNewEntry = std::make_pair(NewEntry.Rank, NewEntry.HeapIdentifier);
-                    if(!RootMapping.Entries.count(KeyForNewEntry)) {
-                        RootMapping.Entries[KeyForNewEntry] = NewEntry;
-                    } else {
-                        RootMapping.Entries[KeyForNewEntry].debugPrint(*this);
-                        NewEntry.debugPrint(*this);
-                        RootMapping.Entries[KeyForNewEntry] = RootMapping.Entries[KeyForNewEntry].merge(NewEntry);
-                    }
-
-                    //RootMapping.Entries[KeyForNewEntry].debugPrint(*this);
+                    RootMapping = RootMapping.merge(NewRoot);
 
                     isl_set_free(EntranceConstraints);
                 }
